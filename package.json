@@ -10,17 +10,25 @@
     "seed": "node src/utils/seedAdmin.js"
   },
   "dependencies": {
+    "aws-sdk": "^2.1693.0",
     "axios": "^1.20.0",
     "bcryptjs": "^2.4.3",
     "cors": "^2.8.5",
     "dotenv": "^16.4.5",
     "express": "^4.19.2",
+    "image-size": "^1.2.1",
     "jsonwebtoken": "^9.0.2",
     "multer": "^1.4.5-lts.1",
     "mysql2": "^3.10.0",
-    "sequelize": "^6.37.3"
+    "pdfkit": "^0.20.2",
+    "qrcode": "^1.5.4",
+    "sequelize": "^6.37.3",
+    "sharp": "^0.35.4"
   },
   "devDependencies": {
     "nodemon": "^3.1.4"
+  },
+  "engines": {
+    "node": "22.x"
   }
 }

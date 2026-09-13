@@ -1,6 +1,7 @@
 const { Op } = require('sequelize');
 const { User } = require('../models');
 const { publicUser } = require('./authController');
+const { uploadFileToS3 } = require('../services/s3Service');
 
 const USER_TYPES = ['farmer', 'retailer', 'distributor', 'supplier', 'consumer'];
 
@@ -23,8 +24,10 @@ const updateMe = async (req, res) => {
     if (email !== undefined) user.email = email;
     if (userType !== undefined) user.userType = userType;
     if (address !== undefined) user.address = address;
+
     if (req.file) {
-      user.photoUrl = `${process.env.BASE_URL}/uploads/${req.file.filename}`;
+      const uploadedUrl = await uploadFileToS3(req.file, 'profile-photos');
+      user.photoUrl = uploadedUrl;
     }
 
     user.profileCompleted = true;
@@ -33,7 +36,7 @@ const updateMe = async (req, res) => {
     return res.status(200).json({ message: 'Profile updated.', user: publicUser(user) });
   } catch (err) {
     console.error(err);
-    return res.status(500).json({ message: 'Could not update profile.' });
+    return res.status(500).json({ message: err.message || 'Could not update profile.' });
   }
 };
 

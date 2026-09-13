@@ -34,7 +34,6 @@ const Otp = sequelize.define(
     tableName: 'otps',
     underscored: true,
     timestamps: true,
-    createdAt: 'created_at',
     updatedAt: false,
   }
 );

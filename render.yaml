@@ -1,0 +1,65 @@
+services:
+  - type: web
+    name: originhash-backend
+    runtime: node
+    plan: free
+    buildCommand: npm install
+    startCommand: npm start
+    healthCheckPath: /api/health
+    envVars:
+      - key: NODE_ENV
+        value: production
+      - key: PORT
+        value: 5000
+      - key: DB_HOST
+        sync: false
+      - key: DB_PORT
+        sync: false
+      - key: DB_NAME
+        sync: false
+      - key: DB_USER
+        sync: false
+      - key: DB_PASSWORD
+        sync: false
+      - key: DB_SSL
+        value: "true"
+      - key: JWT_SECRET
+        generateValue: true
+      - key: JWT_EXPIRES_IN
+        value: 7d
+      - key: ADMIN_MOBILE
+        sync: false
+      - key: ADMIN_OTP
+        sync: false
+      - key: ADMIN_NAME
+        value: Admin
+      - key: SUPER_ADMIN_USERNAME
+        sync: false
+      - key: SUPER_ADMIN_PASSWORD
+        sync: false
+      - key: TWO_FACTOR_API_KEY
+        sync: false
+      - key: TWO_FACTOR_TEMPLATE_NAME
+        value: ORIGINHASH_OTP
+      - key: OTP_LENGTH
+        value: "4"
+      - key: OTP_EXPIRES_MINUTES
+        value: "5"
+      - key: BASE_URL
+        sync: false
+      - key: PUBLIC_APP_URL
+        sync: false
+      - key: CORS_ORIGIN
+        sync: false
+      - key: AWS_ACCESS_KEY_ID
+        sync: false
+      - key: AWS_SECRET_ACCESS_KEY
+        sync: false
+      - key: AWS_REGION
+        sync: false
+      - key: S3_BUCKET
+        sync: false
+      - key: S3_PUBLIC_BASE_URL
+        sync: false
+      - key: S3_UPLOAD_FOLDER
+        value: profile-photos

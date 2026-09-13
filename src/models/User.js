@@ -11,8 +11,18 @@ const User = sequelize.define(
     },
     mobile: {
       type: DataTypes.STRING(15),
-      allowNull: false,
+      allowNull: true,
       unique: true,
+    },
+    username: {
+      type: DataTypes.STRING(50),
+      allowNull: true,
+      unique: true,
+    },
+    passwordHash: {
+      type: DataTypes.STRING(255),
+      allowNull: true,
+      field: 'password_hash',
     },
     countryCode: {
       type: DataTypes.STRING(5),
@@ -48,6 +58,12 @@ const User = sequelize.define(
       defaultValue: false,
       field: 'is_admin',
     },
+    isSuperAdmin: {
+      type: DataTypes.BOOLEAN,
+      allowNull: false,
+      defaultValue: false,
+      field: 'is_super_admin',
+    },
     isBlocked: {
       type: DataTypes.BOOLEAN,
       allowNull: false,
@@ -71,8 +87,6 @@ const User = sequelize.define(
     tableName: 'users',
     underscored: true,
     timestamps: true,
-    createdAt: 'created_at',
-    updatedAt: 'updated_at',
   }
 );
 

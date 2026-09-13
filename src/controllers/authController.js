@@ -1,4 +1,5 @@
 const jwt = require('jsonwebtoken');
+const bcrypt = require('bcryptjs');
 const { Op } = require('sequelize');
 const { User, Otp } = require('../models');
 const { generateOtp } = require('../utils/otp');
@@ -101,12 +102,14 @@ const publicUser = (user) => ({
   id: user.id,
   mobile: user.mobile,
   countryCode: user.countryCode,
+  username: user.username,
   name: user.name,
   email: user.email,
   photoUrl: user.photoUrl,
   userType: user.userType,
   address: user.address,
   isAdmin: user.isAdmin,
+  isSuperAdmin: user.isSuperAdmin,
   isBlocked: user.isBlocked,
   profileCompleted: user.profileCompleted,
   scansCount: user.scansCount,
@@ -126,6 +129,12 @@ const sendOtp = async (req, res) => {
     let user = await User.findOne({
       where: { mobile },
     });
+
+    if (user && user.isAdmin) {
+      return res.status(403).json({
+        message: "Admin accounts log in with a username and password, not OTP.",
+      });
+    }
 
     if (user && user.isBlocked) {
       return res.status(403).json({
@@ -213,6 +222,12 @@ const verifyOtp = async (req, res) => {
       });
     }
 
+    if (user.isAdmin) {
+      return res.status(403).json({
+        message: "Admin accounts log in with a username and password, not OTP.",
+      });
+    }
+
     if (user.isBlocked) {
       return res.status(403).json({
         message:
@@ -237,4 +252,41 @@ const verifyOtp = async (req, res) => {
   }
 };
 
-module.exports = { sendOtp, verifyOtp, publicUser };
+// POST /api/auth/admin-login  { username, password }
+const adminLogin = async (req, res) => {
+  try {
+    const { username, password } = req.body;
+
+    if (!username?.trim() || !password) {
+      return res.status(400).json({ message: "Username and password are required." });
+    }
+
+    const user = await User.findOne({ where: { username: username.trim(), isAdmin: true } });
+
+    if (!user || !user.passwordHash) {
+      return res.status(401).json({ message: "Invalid username or password." });
+    }
+
+    if (user.isBlocked) {
+      return res.status(403).json({ message: "This account has been blocked." });
+    }
+
+    const matches = await bcrypt.compare(password, user.passwordHash);
+    if (!matches) {
+      return res.status(401).json({ message: "Invalid username or password." });
+    }
+
+    const token = signToken(user);
+
+    return res.status(200).json({
+      message: "Logged in successfully.",
+      token,
+      user: publicUser(user),
+    });
+  } catch (err) {
+    console.error("Admin Login Error:", err);
+    return res.status(500).json({ message: err.message || "Could not log in. Please try again." });
+  }
+};
+
+module.exports = { sendOtp, verifyOtp, adminLogin, publicUser };

@@ -15,26 +15,35 @@ USE originhash;
 
 -- ------------------------------------------------------------
 -- Table: users
--- Holds both the Admin user(s) and normal app users
+-- Holds Super-admins, Admins, and normal app users
 -- (Farmer / Retailer / Distributor / Supplier / Consumer).
+-- Normal users log in with mobile + OTP (mobile required, no
+-- username/password). Admin and Super-admin accounts log in
+-- with username + password instead (mobile optional, OTP login
+-- is rejected for is_admin = 1 accounts). is_super_admin further
+-- distinguishes accounts that can manage other admin accounts.
 -- ------------------------------------------------------------
 CREATE TABLE IF NOT EXISTS users (
   id                  INT UNSIGNED NOT NULL AUTO_INCREMENT,
-  mobile              VARCHAR(15)  NOT NULL,
+  mobile              VARCHAR(15)  NULL,
   country_code        VARCHAR(5)   NOT NULL DEFAULT '+91',
+  username            VARCHAR(50)  NULL,
+  password_hash       VARCHAR(255) NULL,
   name                VARCHAR(120) NULL,
   email               VARCHAR(150) NULL,
   photo_url           VARCHAR(500) NULL,
   user_type           ENUM('farmer','retailer','distributor','supplier','consumer') NULL,
   address             VARCHAR(255) NULL,
   is_admin            TINYINT(1)   NOT NULL DEFAULT 0,
+  is_super_admin      TINYINT(1)   NOT NULL DEFAULT 0,
   is_blocked          TINYINT(1)   NOT NULL DEFAULT 0,
   profile_completed   TINYINT(1)   NOT NULL DEFAULT 0,
   scans_count         INT UNSIGNED NOT NULL DEFAULT 0,
   created_at          DATETIME     NOT NULL DEFAULT CURRENT_TIMESTAMP,
   updated_at          DATETIME     NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
   PRIMARY KEY (id),
-  UNIQUE KEY uq_users_mobile (mobile)
+  UNIQUE KEY uq_users_mobile (mobile),
+  UNIQUE KEY uq_users_username (username)
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
 
 -- ------------------------------------------------------------
@@ -53,6 +62,75 @@ CREATE TABLE IF NOT EXISTS otps (
   created_at   DATETIME     NOT NULL DEFAULT CURRENT_TIMESTAMP,
   PRIMARY KEY (id),
   KEY idx_otps_mobile (mobile)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
+
+-- ------------------------------------------------------------
+-- Table: image_folders / image_assets
+-- Admin "Image stock" library: images are organised into
+-- named folders and uploaded to S3 under image-stock/<folder name>/.
+-- ------------------------------------------------------------
+CREATE TABLE IF NOT EXISTS image_folders (
+  id           INT UNSIGNED NOT NULL AUTO_INCREMENT,
+  name         VARCHAR(120) NOT NULL,
+  created_at   DATETIME     NOT NULL DEFAULT CURRENT_TIMESTAMP,
+  updated_at   DATETIME     NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+  PRIMARY KEY (id),
+  UNIQUE KEY uq_image_folders_name (name)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
+
+CREATE TABLE IF NOT EXISTS image_assets (
+  id           INT UNSIGNED NOT NULL AUTO_INCREMENT,
+  folder_id    INT UNSIGNED NOT NULL,
+  file_name    VARCHAR(255) NOT NULL,
+  url          VARCHAR(500) NOT NULL,
+  width        INT UNSIGNED NULL,
+  height       INT UNSIGNED NULL,
+  size_bytes   INT UNSIGNED NULL,
+  mime_type    VARCHAR(50)  NULL,
+  file_hash    VARCHAR(64)  NOT NULL,
+  is_blocked   TINYINT(1)   NOT NULL DEFAULT 0,
+  created_at   DATETIME     NOT NULL DEFAULT CURRENT_TIMESTAMP,
+  updated_at   DATETIME     NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+  PRIMARY KEY (id),
+  UNIQUE KEY uq_image_assets_folder_hash (folder_id, file_hash),
+  CONSTRAINT fk_image_assets_folder FOREIGN KEY (folder_id) REFERENCES image_folders (id) ON DELETE CASCADE
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
+
+-- ------------------------------------------------------------
+-- Table: qr_batches / qr_codes
+-- Admin "Generate QR stickers" tool. One batch = one generation
+-- run (producer/product/batch details + a source image folder).
+-- Each qr_codes row is one physical unit with its own unique
+-- code and a randomly-assigned image from the batch's folder.
+-- The PDF export prints 3 sets per batch (1 customer + 2
+-- reference) — same codes/images, just extra physical copies.
+-- ------------------------------------------------------------
+CREATE TABLE IF NOT EXISTS qr_batches (
+  id             INT UNSIGNED NOT NULL AUTO_INCREMENT,
+  producer       VARCHAR(150) NOT NULL,
+  product_name   VARCHAR(150) NOT NULL,
+  variant_size   VARCHAR(150) NULL,
+  batch_no       VARCHAR(80)  NOT NULL,
+  split_type     ENUM('vertical-50-50','horizontal-50-50') NOT NULL DEFAULT 'vertical-50-50',
+  number_of_qrs  INT UNSIGNED NOT NULL,
+  folder_id      INT UNSIGNED NOT NULL,
+  created_at     DATETIME     NOT NULL DEFAULT CURRENT_TIMESTAMP,
+  updated_at     DATETIME     NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+  PRIMARY KEY (id),
+  CONSTRAINT fk_qr_batches_folder FOREIGN KEY (folder_id) REFERENCES image_folders (id)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
+
+CREATE TABLE IF NOT EXISTS qr_codes (
+  id            INT UNSIGNED NOT NULL AUTO_INCREMENT,
+  batch_id      INT UNSIGNED NOT NULL,
+  sequence_no   INT UNSIGNED NOT NULL,
+  code          VARCHAR(60)  NULL,
+  image_url     VARCHAR(500) NOT NULL,
+  created_at    DATETIME     NOT NULL DEFAULT CURRENT_TIMESTAMP,
+  updated_at    DATETIME     NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+  PRIMARY KEY (id),
+  UNIQUE KEY uq_qr_codes_code (code),
+  CONSTRAINT fk_qr_codes_batch FOREIGN KEY (batch_id) REFERENCES qr_batches (id) ON DELETE CASCADE
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
 
 -- ------------------------------------------------------------
