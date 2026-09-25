@@ -9,6 +9,7 @@ const adminRoutes = require('./routes/adminRoutes');
 const imageStockRoutes = require('./routes/imageStockRoutes');
 const qrStickerRoutes = require('./routes/qrStickerRoutes');
 const dashboardRoutes = require('./routes/dashboardRoutes');
+const scanRoutes = require('./routes/scanRoutes');
 
 const app = express();
 
@@ -49,6 +50,7 @@ app.use('/api/admins', adminRoutes);
 app.use('/api/image-stock', imageStockRoutes);
 app.use('/api/qr-stickers', qrStickerRoutes);
 app.use('/api/dashboard', dashboardRoutes);
+app.use('/api/scans', scanRoutes);
 
 // 404
 app.use((req, res) => res.status(404).json({ message: 'Route not found.' }));

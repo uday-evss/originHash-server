@@ -13,6 +13,14 @@ const MIN_QRS = 1;
 const MAX_QRS = 500;
 const SPLIT_TYPES = ['vertical-50-50', 'horizontal-50-50'];
 
+// A sticker's QR opens the public verify page for its code, so a phone's own camera app
+// lands somewhere useful and the in-app scanner can tell exactly which unit it is.
+// Falls back to the bare code (which the in-app scanner also accepts) if PUBLIC_APP_URL is unset.
+const stickerQrPayload = (code) => {
+  const appUrl = (process.env.PUBLIC_APP_URL || '').replace(/\/+$/, '');
+  return appUrl ? `${appUrl}/verify/${encodeURIComponent(code)}` : code;
+};
+
 const slugifyForCode = (name) =>
   (name || 'PRODUCT')
     .toUpperCase()
@@ -318,7 +326,7 @@ const downloadBatchPdf = async (req, res) => {
       const y = PAGE_MARGIN + GAP_Y + row * (CARD_H + GAP_Y);
 
       const imageBuffer = await fetchImageBuffer(codeRow.imageUrl, imageCache).catch(() => null);
-      const qrBuffer = await QRCode.toBuffer(codeRow.imageUrl, { margin: 0, width: 300 });
+      const qrBuffer = await QRCode.toBuffer(stickerQrPayload(codeRow.code), { margin: 0, width: 300 });
 
       await drawSticker(doc, x, y, {
         producer: batch.producer,

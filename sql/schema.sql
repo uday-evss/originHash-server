@@ -134,6 +134,28 @@ CREATE TABLE IF NOT EXISTS qr_codes (
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
 
 -- ------------------------------------------------------------
+-- Table: scans
+-- One row per scan a user completes in the app. action 'record'
+-- logs that a product reached this user (supply-chain movement,
+-- with the device location when shared); 'verify' checks the QR
+-- is genuine. qr_code_id is NULL when the code matched nothing.
+-- ------------------------------------------------------------
+CREATE TABLE IF NOT EXISTS scans (
+  id           INT UNSIGNED NOT NULL AUTO_INCREMENT,
+  user_id      INT UNSIGNED NOT NULL,
+  qr_code_id   INT UNSIGNED NULL,
+  code         VARCHAR(60)  NULL,
+  action       ENUM('record','verify') NOT NULL,
+  result       ENUM('recorded','authentic','not_found','invalid') NOT NULL,
+  latitude     DECIMAL(9,6) NULL,
+  longitude    DECIMAL(9,6) NULL,
+  created_at   DATETIME     NOT NULL DEFAULT CURRENT_TIMESTAMP,
+  PRIMARY KEY (id),
+  CONSTRAINT fk_scans_user FOREIGN KEY (user_id) REFERENCES users (id) ON DELETE CASCADE,
+  CONSTRAINT fk_scans_qr_code FOREIGN KEY (qr_code_id) REFERENCES qr_codes (id) ON DELETE SET NULL
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
+
+-- ------------------------------------------------------------
 -- Seed: default Admin account
 -- Mobile: 7816018884, static login OTP: 8884
 -- (also created automatically by src/utils/seedAdmin.js on boot)
@@ -186,3 +208,13 @@ ON DUPLICATE KEY UPDATE is_admin = 1;
 -- Admin adds a user manually:
 -- INSERT INTO users (mobile, country_code, name, email, user_type, address, is_admin, is_blocked, profile_completed, created_at, updated_at)
 -- VALUES (?, '+91', ?, ?, ?, ?, 0, 0, 1, NOW(), NOW());
+
+-- Record / verify a scan (POST /api/scans):
+-- SELECT * FROM qr_codes WHERE code = ? LIMIT 1;
+-- INSERT INTO scans (user_id, qr_code_id, code, action, result, latitude, longitude, created_at)
+-- VALUES (?, ?, ?, ?, ?, ?, ?, NOW());
+-- UPDATE users SET scans_count = scans_count + 1 WHERE id = ?;
+
+-- Home screen totals and latest scans (GET /api/scans/summary):
+-- SELECT action, result, COUNT(id) AS count FROM scans WHERE user_id = ? GROUP BY action, result;
+-- SELECT * FROM scans WHERE user_id = ? ORDER BY id DESC LIMIT 5;
