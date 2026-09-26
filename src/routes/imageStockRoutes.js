@@ -30,7 +30,8 @@ router.patch('/images/:id/block', adminOnly, blockImage);
 router.patch('/images/:id/unblock', adminOnly, unblockImage);
 
 // Admin+ test data: a randomly named folder of 10 photos (dog, cat, human, peacock, lion, …).
-// These sample folders are the one exception to "no deleting" — and only until a QR batch uses one.
+// These sample folders are the one exception to "no deleting"; QR batches made from one keep
+// their stickers and photos after it's deleted.
 router.post('/folders/sample', adminOnly, createSampleFolder);
 router.delete('/folders/:id', adminOnly, deleteFolder);
 

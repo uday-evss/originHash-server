@@ -99,7 +99,9 @@ CREATE TABLE IF NOT EXISTS otps (
 -- named folders and uploaded to S3 under image-stock/<folder name>/.
 -- is_sample marks folders made by "Generate sample folder" (10
 -- photos of different animals / people from iNaturalist); only
--- those can be deleted, and only while no QR batch uses them.
+-- those can be deleted. Deleting sets deleted_at (the row stays so
+-- QR batches made from it keep their folder), removes its
+-- image_assets, and removes from S3 only photos no sticker uses.
 -- ------------------------------------------------------------
 CREATE TABLE IF NOT EXISTS image_folders (
   id           INT UNSIGNED NOT NULL AUTO_INCREMENT,
@@ -107,6 +109,7 @@ CREATE TABLE IF NOT EXISTS image_folders (
   is_sample    TINYINT(1)   NOT NULL DEFAULT 0,
   created_at   DATETIME     NOT NULL DEFAULT CURRENT_TIMESTAMP,
   updated_at   DATETIME     NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+  deleted_at   DATETIME     NULL,  -- set when a sample folder is deleted; hidden everywhere
   PRIMARY KEY (id),
   UNIQUE KEY uq_image_folders_name (name)
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;

@@ -140,6 +140,12 @@ const migrateScans = async () => {
       console.log('image_folders.is_sample added.');
     }
 
+    // Deleted (sample) folders are only hidden, so batches made from them keep their folder.
+    if (!(await columnType('image_folders', 'deleted_at'))) {
+      await sequelize.query('ALTER TABLE image_folders ADD COLUMN deleted_at DATETIME NULL');
+      console.log('image_folders.deleted_at added.');
+    }
+
     await ensureImageSerials();
 
     // Paper size each batch's sticker PDF is laid out for; older batches (NULL) print on A4.

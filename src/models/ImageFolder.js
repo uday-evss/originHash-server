@@ -15,7 +15,7 @@ const ImageFolder = sequelize.define(
       unique: true,
     },
     // Made by "Generate sample folder" (10 stock photos for trying things out). Only these can
-    // be deleted, and only while no QR batch has used them.
+    // be deleted.
     isSample: {
       type: DataTypes.BOOLEAN,
       allowNull: false,
@@ -27,6 +27,9 @@ const ImageFolder = sequelize.define(
     tableName: 'image_folders',
     underscored: true,
     timestamps: true,
+    // Deleting a folder only sets deleted_at: QR batches keep pointing at it (and at its name),
+    // while every normal query leaves it out. Pass `paranoid: false` to include deleted folders.
+    paranoid: true,
   }
 );
 

@@ -1,7 +1,7 @@
 const crypto = require('crypto');
 const { Op } = require('sequelize');
 const sizeOf = require('image-size');
-const { sequelize, ImageFolder, ImageAsset, QrBatch } = require('../models');
+const { sequelize, ImageFolder, ImageAsset, QrBatch, QrCode } = require('../models');
 const { uploadFileToS3, deleteFilesFromS3 } = require('../services/s3Service');
 const { sampleCandidates, downloadPhoto } = require('../services/sampleImages');
 const { checkImageQuality } = require('../utils/imageQuality');
@@ -76,7 +76,7 @@ const createFolder = async (req, res) => {
       return res.status(400).json({ message: 'Folder name is required.' });
     }
 
-    const existing = await ImageFolder.findOne({ where: { name } });
+    const existing = await ImageFolder.findOne({ where: { name }, paranoid: false });
     if (existing) {
       return res.status(409).json({ message: 'A folder with this name already exists.' });
     }
@@ -205,8 +205,8 @@ const uploadImages = async (req, res) => {
   }
 };
 
-// Removes a deleted folder's files from S3. Best effort: its database rows are already gone, so
-// a failure here only leaves unreferenced files in the bucket.
+// Removes a deleted folder's unused files from S3. Best effort: its database rows are already
+// gone, so a failure here only leaves unreferenced files in the bucket.
 const deleteFolderFiles = async (folder, urls) => {
   try {
     await deleteFilesFromS3(urls, `${s3FolderPath(folder.name)}/`);
@@ -219,7 +219,7 @@ const deleteFolderFiles = async (folder, urls) => {
 const sampleFolderName = async () => {
   for (;;) {
     const name = `Sample-${crypto.randomBytes(3).toString('hex').toUpperCase()}`;
-    if (!(await ImageFolder.findOne({ where: { name } }))) return name;
+    if (!(await ImageFolder.findOne({ where: { name }, paranoid: false }))) return name;
   }
 };
 
@@ -272,7 +272,7 @@ const createSampleFolder = async (req, res) => {
     }
 
     if (!created.length) {
-      await folder.destroy();
+      await folder.destroy({ force: true });
       return res.status(502).json({ message: 'Could not fetch any sample photos. Try again in a minute.', skipped });
     }
 
@@ -288,18 +288,24 @@ const createSampleFolder = async (req, res) => {
     if (folder) {
       const images = await ImageAsset.findAll({ where: { folderId: folder.id }, attributes: ['url'] }).catch(() => []);
       await ImageAsset.destroy({ where: { folderId: folder.id } }).catch(() => {});
-      await folder.destroy().catch(() => {});
+      await folder.destroy({ force: true }).catch(() => {});
       await deleteFolderFiles(folder, images.map((image) => image.url));
     }
     return res.status(500).json({ message: err.message || 'Could not generate a sample folder.' });
   }
 };
 
-// DELETE /api/image-stock/folders/:id  (admin) — generated sample folders only, and only while
-// no QR batch has used them. Any other image may be printed on stickers; block those instead.
+// DELETE /api/image-stock/folders/:id  (admin) — generated sample folders only; any other image
+// may be printed on stickers, so block those instead. QR batches made from the folder are left
+// exactly as they were:
+//  - the folder row is only hidden (deleted_at), so batches still point at it and show its name;
+//  - each sticker keeps its own copy of its photo's URL, and photos that any sticker uses stay in
+//    S3 — only the folder's unused photos are deleted from the bucket.
 const deleteFolder = async (req, res) => {
   try {
     const result = await sequelize.transaction(async (transaction) => {
+      // Waits for any batch being generated from this folder (createBatch holds a shared lock),
+      // so its stickers are counted below.
       const folder = await ImageFolder.findByPk(req.params.id, { transaction, lock: transaction.LOCK.UPDATE });
       if (!folder) return { status: 404, message: 'Folder not found.' };
       if (!folder.isSample) {
@@ -309,26 +315,32 @@ const deleteFolder = async (req, res) => {
         };
       }
 
-      const batches = await QrBatch.count({ where: { folderId: folder.id }, transaction });
-      if (batches) {
-        return {
-          status: 409,
-          message: `${folder.name} was used for ${batches} QR batch${batches === 1 ? '' : 'es'} — its photos are on those stickers, so it can't be deleted.`,
-        };
-      }
-
       const images = await ImageAsset.findAll({ where: { folderId: folder.id }, attributes: ['url'], transaction });
+      const urls = images.map((image) => image.url);
+      const usedRows = urls.length
+        ? await QrCode.findAll({ where: { imageUrl: urls }, attributes: ['imageUrl'], raw: true, transaction })
+        : [];
+      const used = new Set(usedRows.map((row) => row.imageUrl));
+      const batches = await QrBatch.count({ where: { folderId: folder.id }, transaction });
+
       await ImageAsset.destroy({ where: { folderId: folder.id }, transaction });
-      await folder.destroy({ transaction });
-      return { status: 200, folder, urls: images.map((image) => image.url) };
+      await folder.destroy({ transaction }); // hides it (sets deleted_at)
+      return { status: 200, folder, batches, unusedUrls: urls.filter((url) => !used.has(url)) };
     });
 
     if (result.status !== 200) {
       return res.status(result.status).json({ message: result.message });
     }
 
-    await deleteFolderFiles(result.folder, result.urls);
-    return res.status(200).json({ message: `${result.folder.name} deleted.`, folderId: result.folder.id });
+    await deleteFolderFiles(result.folder, result.unusedUrls);
+    const { folder, batches } = result;
+    const kept =
+      batches === 1
+        ? ' The QR batch made from it keeps its stickers and photos.'
+        : batches > 1
+          ? ` The ${batches} QR batches made from it keep their stickers and photos.`
+          : '';
+    return res.status(200).json({ message: `${folder.name} deleted.${kept}`, folderId: folder.id });
   } catch (err) {
     console.error(err);
     return res.status(500).json({ message: 'Could not delete folder.' });

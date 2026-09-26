@@ -3,7 +3,7 @@ const sharp = require('sharp');
 const PDFDocument = require('pdfkit');
 const QRCode = require('qrcode');
 const { Op } = require('sequelize');
-const { QrBatch, QrCode, ImageFolder, ImageAsset, User, UserProfileVersion } = require('../models');
+const { sequelize, QrBatch, QrCode, ImageFolder, ImageAsset, User, UserProfileVersion } = require('../models');
 const { canSeeFullJourney, isAdminUser } = require('../utils/roles');
 const { TRACKED_FIELDS, profileChanges, recordProfileVersion } = require('../utils/profileHistory');
 
@@ -41,6 +41,7 @@ const batchJson = (batch) => ({
   numberOfQrs: batch.numberOfQrs,
   folderId: batch.folderId,
   folderName: batch.folder ? batch.folder.name : undefined,
+  folderDeleted: Boolean(batch.folder?.deletedAt),
   createdAt: batch.createdAt,
 });
 
@@ -77,6 +78,7 @@ const codeJson = (code) => ({
   splitType: code.batch?.splitType,
   pageSize: code.batch?.pageSize || 'A4',
   folderName: code.batch?.folder?.name,
+  folderDeleted: Boolean(code.batch?.folder?.deletedAt),
 });
 
 // Batch numbers are unique across every batch. Compared by the column's collation, so
@@ -125,44 +127,51 @@ const createBatch = async (req, res) => {
       return res.status(400).json({ message: `Number of QRs must be between ${MIN_QRS} and ${MAX_QRS}.` });
     }
 
-    const folder = await ImageFolder.findByPk(folderId);
-    if (!folder) {
-      return res.status(404).json({ message: 'Selected folder was not found.' });
-    }
+    // All or nothing, holding a shared lock on the folder: a sample folder can't be deleted while
+    // stickers are being made from it, and one deleted a moment ago is simply not found.
+    const result = await sequelize.transaction(async (transaction) => {
+      const folder = await ImageFolder.findByPk(folderId, { transaction, lock: transaction.LOCK.SHARE });
+      if (!folder) return { status: 404, message: 'Selected folder was not found.' };
 
-    const availableImages = await ImageAsset.findAll({ where: { folderId, isBlocked: false } });
-    if (!availableImages.length) {
-      return res.status(400).json({ message: 'Selected folder has no available (unblocked) images.' });
-    }
+      const availableImages = await ImageAsset.findAll({ where: { folderId, isBlocked: false }, transaction });
+      if (!availableImages.length) {
+        return { status: 400, message: 'Selected folder has no available (unblocked) images.' };
+      }
 
-    // Pin the creator's details as they are right now, so a later rename can't blur who made this.
-    const creatorProfile = await recordProfileVersion(req.user, { source: 'system' });
+      // Pin the creator's details as they are right now, so a later rename can't blur who made this.
+      const creatorProfile = await recordProfileVersion(req.user, { source: 'system', transaction });
 
-    const batch = await QrBatch.create({
-      producer: producer.trim(),
-      productName: productName.trim(),
-      variantSize: variantSize?.trim() || null,
-      batchNo: batchNo.trim(),
-      splitType,
-      pageSize,
-      numberOfQrs: count,
-      folderId,
-      createdBy: req.user.id,
-      creatorProfileVersionId: creatorProfile.id,
+      const batch = await QrBatch.create(
+        {
+          producer: producer.trim(),
+          productName: productName.trim(),
+          variantSize: variantSize?.trim() || null,
+          batchNo: batchNo.trim(),
+          splitType,
+          pageSize,
+          numberOfQrs: count,
+          folderId,
+          createdBy: req.user.id,
+          creatorProfileVersionId: creatorProfile.id,
+        },
+        { transaction }
+      );
+
+      const codes = [];
+      for (let i = 1; i <= count; i++) {
+        const image = availableImages[Math.floor(Math.random() * availableImages.length)];
+        const code = await QrCode.create({ batchId: batch.id, sequenceNo: i, imageUrl: image.url }, { transaction });
+        code.code = `${slugifyForCode(productName)}-${String(code.id).padStart(5, '0')}`;
+        await code.save({ transaction });
+        codes.push(code);
+      }
+      return { folder, batch, codes };
     });
 
-    const codes = [];
-    for (let i = 1; i <= count; i++) {
-      const image = availableImages[Math.floor(Math.random() * availableImages.length)];
-      const code = await QrCode.create({
-        batchId: batch.id,
-        sequenceNo: i,
-        imageUrl: image.url,
-      });
-      code.code = `${slugifyForCode(productName)}-${String(code.id).padStart(5, '0')}`;
-      await code.save();
-      codes.push(code);
+    if (result.status) {
+      return res.status(result.status).json({ message: result.message });
     }
+    const { folder, batch, codes } = result;
 
     return res.status(201).json({
       message: `${count} QR sticker(s) generated.`,
@@ -194,7 +203,7 @@ const listCodes = async (req, res) => {
 
     // Only admins see who generated each batch.
     const isAdmin = isAdminUser(req.user);
-    const batchIncludes = [{ model: ImageFolder, as: 'folder', attributes: ['name'] }];
+    const batchIncludes = [{ model: ImageFolder, as: 'folder', attributes: ['name', 'deletedAt'], paranoid: false }];
     if (isAdmin) {
       batchIncludes.push(
         { model: User, as: 'creator', attributes: ['id', 'username', ...TRACKED_FIELDS] },
