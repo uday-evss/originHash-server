@@ -145,7 +145,7 @@ CREATE TABLE IF NOT EXISTS qr_batches (
   producer       VARCHAR(150) NOT NULL,
   product_name   VARCHAR(150) NOT NULL,
   variant_size   VARCHAR(150) NULL,
-  batch_no       VARCHAR(80)  NOT NULL,
+  batch_no       VARCHAR(80)  NOT NULL,  -- unique across batches (checked by the API, case-insensitive)
   split_type     ENUM('vertical-50-50','horizontal-50-50') NOT NULL DEFAULT 'vertical-50-50',
   page_size      VARCHAR(2)   NULL,  -- 'A4' or 'A3' for the sticker PDF; NULL (older batches) = A4
   number_of_qrs  INT UNSIGNED NOT NULL,

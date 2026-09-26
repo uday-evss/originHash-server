@@ -79,6 +79,25 @@ const codeJson = (code) => ({
   folderName: code.batch?.folder?.name,
 });
 
+// Batch numbers are unique across every batch. Compared by the column's collation, so
+// "b-001" and "B-001" count as the same number.
+const batchNoTaken = async (batchNo) => Boolean(await QrBatch.findOne({ where: { batchNo }, attributes: ['id'] }));
+
+const batchNoTakenMessage = (batchNo) => `Batch no "${batchNo}" already exists. Enter another batch number.`;
+
+// GET /api/qr-stickers/batches/check?batchNo= — lets the form warn before submitting
+const checkBatchNo = async (req, res) => {
+  try {
+    const batchNo = String(req.query.batchNo || '').trim();
+    if (!batchNo) return res.status(200).json({ batchNo, exists: false });
+    const exists = await batchNoTaken(batchNo);
+    return res.status(200).json({ batchNo, exists, message: exists ? batchNoTakenMessage(batchNo) : undefined });
+  } catch (err) {
+    console.error(err);
+    return res.status(500).json({ message: 'Could not check the batch number.' });
+  }
+};
+
 // POST /api/qr-stickers/batches
 const createBatch = async (req, res) => {
   try {
@@ -87,6 +106,10 @@ const createBatch = async (req, res) => {
 
     if (!producer?.trim() || !productName?.trim() || !batchNo?.trim()) {
       return res.status(400).json({ message: 'Producer, product name and batch no are required.' });
+    }
+
+    if (await batchNoTaken(batchNo.trim())) {
+      return res.status(409).json({ message: batchNoTakenMessage(batchNo.trim()), field: 'batchNo' });
     }
 
     if (!SPLIT_TYPES.includes(splitType)) {
@@ -462,6 +485,7 @@ const downloadBatchPdf = async (req, res) => {
 
 module.exports = {
   createBatch,
+  checkBatchNo,
   listCodes,
   listFilters,
   verifyCode,

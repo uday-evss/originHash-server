@@ -2,6 +2,7 @@ const express = require('express');
 const { protect } = require('../middleware/auth');
 const {
   createBatch,
+  checkBatchNo,
   listCodes,
   listFilters,
   verifyCode,
@@ -17,6 +18,7 @@ router.get('/verify/:code', verifyCode);
 router.use(protect);
 
 router.post('/batches', createBatch);
+router.get('/batches/check', checkBatchNo);
 router.get('/batches/:id/pdf', downloadBatchPdf);
 
 router.get('/codes', listCodes);
