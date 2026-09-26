@@ -34,6 +34,14 @@ const QrBatch = sequelize.define(
       defaultValue: 'vertical-50-50',
       field: 'split_type',
     },
+    // Paper the sticker PDF is laid out on. NULL on batches made before this existed (= A4).
+    pageSize: {
+      type: DataTypes.STRING(2),
+      allowNull: false,
+      defaultValue: 'A4',
+      validate: { isIn: [['A4', 'A3']] },
+      field: 'page_size',
+    },
     numberOfQrs: {
       type: DataTypes.INTEGER.UNSIGNED,
       allowNull: false,
@@ -43,6 +51,12 @@ const QrBatch = sequelize.define(
       type: DataTypes.INTEGER.UNSIGNED,
       allowNull: false,
       field: 'folder_id',
+    },
+    // The user who generated the batch; they can see the full journey of its stickers.
+    createdBy: {
+      type: DataTypes.INTEGER.UNSIGNED,
+      allowNull: true,
+      field: 'created_by',
     },
   },
   {

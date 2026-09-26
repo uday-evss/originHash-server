@@ -3,6 +3,7 @@ const app = require('./app');
 const { sequelize } = require('./models');
 const seedAdmin = require('./utils/seedAdmin');
 const migrateScans = require('./utils/migrateScans');
+const { backfillLocationNames } = require('./utils/locationNames');
 
 const PORT = process.env.PORT || 5000;
 
@@ -20,6 +21,7 @@ const start = async () => {
 
     app.listen(PORT, () => {
       console.log(`OriginHash backend running on http://localhost:${PORT}`);
+      backfillLocationNames(); // background; rate-limited lookups
     });
   } catch (err) {
     console.error('Failed to start server:', err);

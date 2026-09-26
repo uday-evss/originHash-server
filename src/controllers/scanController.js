@@ -1,6 +1,8 @@
 const { Op } = require('sequelize');
 const { sequelize, QrBatch, QrCode, Scan, ScanReport, User } = require('../models');
 const { uploadFileToS3 } = require('../services/s3Service');
+const { nameScanLocation } = require('../utils/locationNames');
+const { isAdminUser, canSeeFullJourney } = require('../utils/roles');
 
 const ACTIONS = ['record', 'verify'];
 const RECENT_LIMIT = 5;
@@ -30,6 +32,7 @@ const productJson = (codeRow, { withImage = false } = {}) => ({
 
 const scanJson = (scan) => ({
   id: scan.id,
+  uuid: scan.uuid,
   action: scan.action,
   result: scan.result,
   code: scan.code,
@@ -41,7 +44,7 @@ const scanJson = (scan) => ({
 // MySQL returns DECIMAL columns as strings.
 const locationJson = (scan) =>
   scan.latitude !== null && scan.longitude !== null
-    ? { latitude: Number(scan.latitude), longitude: Number(scan.longitude) }
+    ? { latitude: Number(scan.latitude), longitude: Number(scan.longitude), name: scan.locationName ?? null }
     : null;
 
 // The earliest scan that revealed this sticker's image, if any (other than `exceptId`).
@@ -114,11 +117,13 @@ const createScan = async (req, res) => {
     });
     await req.user.increment('scansCount');
 
-    return res.status(201).json({
+    res.status(201).json({
       scan: scanJson(scan),
       product: codeRow ? productJson(codeRow) : null,
       ...(earlierReveal && { firstViewedAt: earlierReveal.imageRevealedAt }),
     });
+    nameScanLocation(scan);
+    return undefined;
   } catch (err) {
     console.error(err);
     return res.status(500).json({ message: 'Could not save this scan.' });
@@ -235,84 +240,120 @@ const reportScan = async (req, res) => {
   }
 };
 
-// GET /api/scans?filter=all|verified|failed|scanned&before=<id> — the user's scan history, newest first.
+// Admins see every user's scans; everyone else sees only their own.
+const historyScope = (user) => (isAdminUser(user) ? {} : { userId: user.id });
+
+const SCANNER_ATTRIBUTES = ['id', 'name', 'userType'];
+
+const scannedByJson = (scan, viewer) =>
+  scan.user ? { name: scan.user.name ?? null, userType: scan.user.userType ?? null, isYou: scan.userId === viewer.id } : null;
+
+// Every "Scan to record" of a sticker, oldest first, plus when (if ever) a buyer verified it.
+// Admins and the batch's creator see everyone's scans; anyone else sees just their own.
+const buildJourney = async (codeRow, viewer) => {
+  const full = canSeeFullJourney(viewer, codeRow);
+  const [records, verified] = await Promise.all([
+    Scan.findAll({
+      where: { qrCodeId: codeRow.id, result: 'SCANNED', ...(!full && { userId: viewer.id }) },
+      include: [{ model: User, as: 'user', attributes: SCANNER_ATTRIBUTES }],
+      order: [['id', 'ASC']],
+      limit: JOURNEY_LIMIT,
+    }),
+    Scan.findOne({ where: { qrCodeId: codeRow.id, result: SUCCEEDED }, order: [['id', 'ASC']] }),
+  ]);
+  // Anything still unnamed gets looked up in the background for next time.
+  records.forEach(nameScanLocation);
+  return {
+    journeyScope: full ? 'all' : 'own',
+    buyerVerifiedAt: verified?.createdAt ?? null,
+    journey: records.map((record) => ({
+      id: record.id,
+      userName: record.user?.name ?? null,
+      userType: record.user?.userType ?? null,
+      isYou: record.userId === viewer.id,
+      location: locationJson(record),
+      createdAt: record.createdAt,
+    })),
+  };
+};
+
+// GET /api/scans?filter=all|verified|failed|scanned&before=<id> — scan history, newest first.
+// Admins get every user's scans (with who scanned); everyone else gets their own.
 const listScans = async (req, res) => {
   try {
     const filter = Object.hasOwn(HISTORY_FILTERS, req.query.filter) ? req.query.filter : 'all';
     const before = Number(req.query.before);
 
-    const where = { userId: req.user.id };
+    const where = historyScope(req.user);
     if (HISTORY_FILTERS[filter]) where.result = HISTORY_FILTERS[filter];
     if (Number.isInteger(before) && before > 0) where.id = { [Op.lt]: before };
 
     const rows = await Scan.findAll({
       where,
-      include: [{ model: QrCode, as: 'qrCode', include: [{ model: QrBatch, as: 'batch' }] }],
+      include: [
+        { model: QrCode, as: 'qrCode', include: [{ model: QrBatch, as: 'batch' }] },
+        { model: User, as: 'user', attributes: SCANNER_ATTRIBUTES },
+      ],
       order: [['id', 'DESC']],
       limit: HISTORY_PAGE + 1,
     });
 
     return res.status(200).json({
+      scope: isAdminUser(req.user) ? 'all' : 'own',
       scans: rows.slice(0, HISTORY_PAGE).map((scan) => ({
         ...scanJson(scan),
         location: locationJson(scan),
         productName: scan.qrCode?.batch?.productName ?? null,
         variantSize: scan.qrCode?.batch?.variantSize ?? null,
         producer: scan.qrCode?.batch?.producer ?? null,
+        scannedBy: scannedByJson(scan, req.user),
       })),
       hasMore: rows.length > HISTORY_PAGE,
     });
   } catch (err) {
     console.error(err);
-    return res.status(500).json({ message: 'Could not load your scan history.' });
+    return res.status(500).json({ message: 'Could not load the scan history.' });
   }
 };
 
-// GET /api/scans/:id — one of the user's scans, with the product, any report, and the product's
-// journey: every "Scan to record" of the same sticker, by anyone, oldest first.
+// GET /api/scans/:id — one scan (the user's own; any scan for admins) with the product, any
+// report, and the sticker's journey as this viewer is allowed to see it.
 const getScan = async (req, res) => {
   try {
     if (!/^\d+$/.test(req.params.id)) {
       return res.status(404).json({ message: 'Scan not found.' });
     }
-    const scan = await findOwnScan(req, [{ model: ScanReport, as: 'report' }]);
+    const scan = await Scan.findOne({
+      where: { id: req.params.id, ...historyScope(req.user) },
+      include: [
+        { model: QrCode, as: 'qrCode', include: [{ model: QrBatch, as: 'batch' }] },
+        { model: ScanReport, as: 'report' },
+        { model: User, as: 'user', attributes: SCANNER_ATTRIBUTES },
+      ],
+    });
     if (!scan) {
       return res.status(404).json({ message: 'Scan not found.' });
     }
 
     let firstViewedAt = null;
-    let journey = [];
-    let buyerVerifiedAt = null;
-    if (scan.qrCodeId) {
-      const [earlier, records, verified] = await Promise.all([
+    let journeyInfo = { journeyScope: 'own', buyerVerifiedAt: null, journey: [] };
+    if (scan.qrCode) {
+      const [earlier, info] = await Promise.all([
         scan.result === 'ALREADY_VIEWED' ? firstReveal(scan.qrCodeId, scan.id) : null,
-        Scan.findAll({
-          where: { qrCodeId: scan.qrCodeId, result: 'SCANNED' },
-          include: [{ model: User, as: 'user', attributes: ['id', 'name', 'userType'] }],
-          order: [['id', 'ASC']],
-          limit: JOURNEY_LIMIT,
-        }),
-        Scan.findOne({ where: { qrCodeId: scan.qrCodeId, result: SUCCEEDED }, order: [['id', 'ASC']] }),
+        buildJourney(scan.qrCode, req.user),
       ]);
       firstViewedAt = earlier?.imageRevealedAt ?? null;
-      buyerVerifiedAt = verified?.createdAt ?? null;
-      journey = records.map((record) => ({
-        id: record.id,
-        userName: record.user?.name ?? null,
-        userType: record.user?.userType ?? null,
-        isYou: record.userId === req.user.id,
-        location: locationJson(record),
-        createdAt: record.createdAt,
-      }));
+      journeyInfo = info;
     }
 
+    nameScanLocation(scan);
     return res.status(200).json({
-      scan: { ...scanJson(scan), location: locationJson(scan), qrCodeId: scan.qrCodeId },
+      scan: { ...scanJson(scan), location: locationJson(scan), qrCodeId: scan.qrCodeId, qrCodeUuid: scan.qrCode?.uuid ?? null },
+      scannedBy: scannedByJson(scan, req.user),
       product: scan.qrCode ? productJson(scan.qrCode) : null,
       report: scan.report ? reportJson(scan.report) : null,
       firstViewedAt,
-      journey,
-      buyerVerifiedAt,
+      ...journeyInfo,
     });
   } catch (err) {
     console.error(err);
@@ -320,20 +361,50 @@ const getScan = async (req, res) => {
   }
 };
 
-// GET /api/scans/summary — the signed-in user's totals and latest scans, for the Home screen.
-// Rolled-back or unanswered verifications count as scans, not as verifications.
+// GET /api/scans/journey/:uuid — a sticker's full journey, by its QR ID. Only for admins and
+// the user who generated the sticker's batch (the "journey" link on their QR stickers).
+const getJourney = async (req, res) => {
+  try {
+    const codeRow = await QrCode.findOne({
+      where: { uuid: req.params.uuid },
+      include: [{ model: QrBatch, as: 'batch' }],
+    });
+    if (!codeRow) {
+      return res.status(404).json({ message: 'Sticker not found.' });
+    }
+    if (!canSeeFullJourney(req.user, codeRow)) {
+      return res.status(403).json({ message: "Only the sticker's creator and admins can see its full journey." });
+    }
+
+    return res.status(200).json({
+      qrCodeUuid: codeRow.uuid,
+      product: productJson(codeRow),
+      ...(await buildJourney(codeRow, req.user)),
+    });
+  } catch (err) {
+    console.error(err);
+    return res.status(500).json({ message: 'Could not load this journey.' });
+  }
+};
+
+// GET /api/scans/summary — totals and latest scans for the Home / Scan dashboard: the user's
+// own, or everyone's for admins. Rolled-back or unanswered verifications count as scans only.
 const getSummary = async (req, res) => {
   try {
+    const where = historyScope(req.user);
     const [counts, recent] = await Promise.all([
       Scan.findAll({
-        where: { userId: req.user.id },
+        where,
         attributes: ['action', 'result', [Scan.sequelize.fn('COUNT', Scan.sequelize.col('id')), 'count']],
         group: ['action', 'result'],
         raw: true,
       }),
       Scan.findAll({
-        where: { userId: req.user.id },
-        include: [{ model: QrCode, as: 'qrCode', include: [{ model: QrBatch, as: 'batch' }] }],
+        where,
+        include: [
+          { model: QrCode, as: 'qrCode', include: [{ model: QrBatch, as: 'batch' }] },
+          { model: User, as: 'user', attributes: SCANNER_ATTRIBUTES },
+        ],
         order: [['id', 'DESC']],
         limit: RECENT_LIMIT,
       }),
@@ -354,17 +425,19 @@ const getSummary = async (req, res) => {
     }
 
     return res.status(200).json({
+      scope: isAdminUser(req.user) ? 'all' : 'own',
       totals,
       recent: recent.map((scan) => ({
         ...scanJson(scan),
         productName: scan.qrCode?.batch?.productName ?? null,
         variantSize: scan.qrCode?.batch?.variantSize ?? null,
+        scannedBy: scannedByJson(scan, req.user),
       })),
     });
   } catch (err) {
     console.error(err);
-    return res.status(500).json({ message: 'Could not load your scans.' });
+    return res.status(500).json({ message: 'Could not load the scans.' });
   }
 };
 
-module.exports = { createScan, revealImage, settleScan, reportScan, getSummary, listScans, getScan };
+module.exports = { createScan, revealImage, settleScan, reportScan, getSummary, listScans, getScan, getJourney };

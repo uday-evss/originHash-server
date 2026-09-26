@@ -4,6 +4,7 @@ const PDFDocument = require('pdfkit');
 const QRCode = require('qrcode');
 const { Op } = require('sequelize');
 const { QrBatch, QrCode, ImageFolder, ImageAsset } = require('../models');
+const { canSeeFullJourney } = require('../utils/roles');
 
 // Stickers only ever show this photo at business-card size, so re-encode it small
 // before embedding — otherwise a batch's PDF balloons to tens of MB per full-res photo.
@@ -35,6 +36,7 @@ const batchJson = (batch) => ({
   variantSize: batch.variantSize,
   batchNo: batch.batchNo,
   splitType: batch.splitType,
+  pageSize: batch.pageSize || 'A4',
   numberOfQrs: batch.numberOfQrs,
   folderId: batch.folderId,
   folderName: batch.folder ? batch.folder.name : undefined,
@@ -43,6 +45,7 @@ const batchJson = (batch) => ({
 
 const codeJson = (code) => ({
   id: code.id,
+  uuid: code.uuid,
   batchId: code.batchId,
   sequenceNo: code.sequenceNo,
   code: code.code,
@@ -53,6 +56,7 @@ const codeJson = (code) => ({
   variantSize: code.batch?.variantSize,
   batchNo: code.batch?.batchNo,
   splitType: code.batch?.splitType,
+  pageSize: code.batch?.pageSize || 'A4',
   folderName: code.batch?.folder?.name,
 });
 
@@ -60,6 +64,7 @@ const codeJson = (code) => ({
 const createBatch = async (req, res) => {
   try {
     const { producer, productName, variantSize, batchNo, splitType, numberOfQrs, folderId } = req.body;
+    const pageSize = req.body.pageSize || 'A4';
 
     if (!producer?.trim() || !productName?.trim() || !batchNo?.trim()) {
       return res.status(400).json({ message: 'Producer, product name and batch no are required.' });
@@ -67,6 +72,10 @@ const createBatch = async (req, res) => {
 
     if (!SPLIT_TYPES.includes(splitType)) {
       return res.status(400).json({ message: 'Invalid split type.' });
+    }
+
+    if (!PAGE_SIZE_NAMES.includes(pageSize)) {
+      return res.status(400).json({ message: 'Paper size must be A4 or A3.' });
     }
 
     const count = Number(numberOfQrs);
@@ -90,8 +99,10 @@ const createBatch = async (req, res) => {
       variantSize: variantSize?.trim() || null,
       batchNo: batchNo.trim(),
       splitType,
+      pageSize,
       numberOfQrs: count,
       folderId,
+      createdBy: req.user.id,
     });
 
     const codes = [];
@@ -149,7 +160,9 @@ const listCodes = async (req, res) => {
       subQuery: false,
     });
 
-    return res.status(200).json({ codes: codes.map(codeJson) });
+    return res.status(200).json({
+      codes: codes.map((code) => ({ ...codeJson(code), canViewJourney: canSeeFullJourney(req.user, code) })),
+    });
   } catch (err) {
     console.error(err);
     return res.status(500).json({ message: 'Could not load generated QR codes.' });
@@ -196,13 +209,38 @@ const listFilters = async (req, res) => {
   }
 };
 
-const CARD_W = 3.5 * 72;
-const CARD_H = 2 * 72;
-const PAGE_MARGIN = 36;
-const COLUMNS = 2;
-const ROWS = 4;
-const GAP_X = (612 - PAGE_MARGIN * 2 - CARD_W * COLUMNS) / (COLUMNS + 1);
-const GAP_Y = (792 - PAGE_MARGIN * 2 - CARD_H * ROWS) / (ROWS + 1);
+// ---------- PDF layout ----------
+// All sizes in PDF points (1 pt = 1/72 in ≈ 0.353 mm).
+const PAGE_SIZES = { A4: [595.28, 841.89], A3: [841.89, 1190.55] };
+const PAGE_SIZE_NAMES = Object.keys(PAGE_SIZES);
+
+// Vertical 50:50 is a business card (89 × 51 mm) with the image and QR side by side.
+// Horizontal 50:50 is a tall card (45 × 65 mm) with the image above the QR — 16 fit on an A4 page.
+const STICKER_SIZES = {
+  'vertical-50-50': { w: 3.5 * 72, h: 2 * 72 },
+  'horizontal-50-50': { w: 128, h: 184 },
+};
+
+const PAGE_MARGIN = 22; // ≈ 8 mm, inside most printers' unprintable edge
+const GAP = 10;
+const HEADER_H = 24;
+
+// The sticker grid for a paper size: tries the page upright and sideways and keeps whichever
+// fits more stickers (A3 horizontal stickers fit best sideways: 8 × 4 = 32).
+const pageLayout = (pageSize, splitType) => {
+  const [pw, ph] = PAGE_SIZES[pageSize] || PAGE_SIZES.A4;
+  const { w, h } = STICKER_SIZES[splitType] || STICKER_SIZES['vertical-50-50'];
+  const fit = (width, height) => {
+    const cols = Math.floor((width - PAGE_MARGIN * 2 + GAP) / (w + GAP));
+    const rows = Math.floor((height - PAGE_MARGIN * 2 - HEADER_H + GAP) / (h + GAP));
+    return { width, height, cols, rows, perPage: cols * rows };
+  };
+  const upright = fit(pw, ph);
+  const sideways = fit(ph, pw);
+  const best = sideways.perPage > upright.perPage ? sideways : upright;
+  const gridWidth = best.cols * w + (best.cols - 1) * GAP;
+  return { ...best, w, h, left: (best.width - gridWidth) / 2, top: PAGE_MARGIN + HEADER_H };
+};
 
 const fetchImageBuffer = async (url, cache) => {
   if (cache.has(url)) return cache.get(url);
@@ -215,67 +253,101 @@ const fetchImageBuffer = async (url, cache) => {
   return resized;
 };
 
-const drawSticker = async (doc, x, y, sticker) => {
-  const { producer, productName, variantSize, batchNo, packedDate, splitType, code, imageBuffer, qrBuffer } = sticker;
-
-  doc.roundedRect(x, y, CARD_W, CARD_H, 6).lineWidth(1).stroke('#e7ddcc');
-
-  doc.rect(x, y, CARD_W, 30).fill('#163832');
-  doc
-    .fillColor('#ffffff')
-    .fontSize(9)
-    .font('Helvetica-Bold')
-    .text(producer.toUpperCase(), x + 10, y + 6, { width: CARD_W - 20 });
-  doc
-    .fillColor('#c9a464')
-    .fontSize(6.5)
-    .font('Helvetica')
-    .text(`Batch ${batchNo} · Packed ${packedDate}`, x + 10, y + 18, { width: CARD_W - 20 });
-
-  doc
-    .fillColor('#163832')
-    .fontSize(9)
-    .font('Helvetica-Bold')
-    .text(productName, x + 10, y + 36, { width: CARD_W - 20, align: 'center' });
-  if (variantSize) {
-    doc
-      .fillColor('#6b7280')
-      .fontSize(6.5)
-      .font('Helvetica')
-      .text(variantSize, x + 10, y + 48, { width: CARD_W - 20, align: 'center' });
-  }
-
-  const bodyTop = y + 58;
-  const bodyHeight = CARD_H - 58 - 16;
-  const bodyPad = 10;
-
-  if (splitType === 'horizontal-50-50') {
-    const halfH = (bodyHeight - 6) / 2;
-    const fullW = CARD_W - bodyPad * 2;
-    doc.rect(x + bodyPad, bodyTop, fullW, halfH).fill('#fbf3e7');
-    if (imageBuffer) {
-      doc.image(imageBuffer, x + bodyPad, bodyTop, { fit: [fullW, halfH], align: 'center', valign: 'center' });
-    }
-    const qrY = bodyTop + halfH + 6;
-    const qrSize = Math.min(halfH, fullW);
-    doc.image(qrBuffer, x + (CARD_W - qrSize) / 2, qrY, { width: qrSize, height: qrSize });
-  } else {
-    const halfW = (CARD_W - bodyPad * 2 - 6) / 2;
-    doc.rect(x + bodyPad, bodyTop, halfW, bodyHeight).fill('#fbf3e7');
-    if (imageBuffer) {
-      doc.image(imageBuffer, x + bodyPad, bodyTop, { fit: [halfW, bodyHeight], align: 'center', valign: 'center' });
-    }
-    const qrX = x + bodyPad + halfW + 6;
-    const qrSize = Math.min(bodyHeight, halfW);
-    doc.image(qrBuffer, qrX + (halfW - qrSize) / 2, bodyTop + (bodyHeight - qrSize) / 2, { width: qrSize, height: qrSize });
-  }
-
-  const footerY = y + CARD_H - 14;
-  doc.fillColor('#163832').fontSize(6).font('Helvetica-Bold').text('ORIGINHASH', x + 10, footerY);
-  doc.fillColor('#163832').fontSize(6).font('Helvetica-Bold').text(code, x + 10, footerY, { width: CARD_W - 20, align: 'right' });
+// Single line of text that never wraps: shrinks down to `minSize`, then cuts with an ellipsis.
+const fitLine = (doc, text, x, y, width, { size, minSize = size, font = 'Helvetica', color, align = 'left' }) => {
+  let s = size;
+  doc.font(font);
+  while (s > minSize && doc.fontSize(s).widthOfString(text) > width) s -= 0.25;
+  doc.fillColor(color).fontSize(s).text(text, x, y, { width, align, lineBreak: false, ellipsis: true, height: s + 2 });
 };
 
-// GET /api/qr-stickers/batches/:id/pdf
+const drawStickerHeader = (doc, x, y, w, { producer, batchNo, packedDate, productName, variantSize }, compact) => {
+  const pad = compact ? 7 : 10;
+  const bandH = compact ? 28 : 30;
+  doc.rect(x, y, w, bandH).fill('#163832');
+  fitLine(doc, producer.toUpperCase(), x + pad, y + (compact ? 5 : 6), w - pad * 2, {
+    size: compact ? 8 : 9,
+    minSize: 6.5,
+    font: 'Helvetica-Bold',
+    color: '#ffffff',
+  });
+  fitLine(doc, `Batch ${batchNo} · Packed ${packedDate}`, x + pad, y + (compact ? 17 : 18), w - pad * 2, {
+    size: compact ? 5.5 : 6.5,
+    minSize: 4.5,
+    color: '#c9a464',
+  });
+  fitLine(doc, productName, x + pad, y + (compact ? 33 : 36), w - pad * 2, {
+    size: compact ? 8 : 9,
+    minSize: 6.5,
+    font: 'Helvetica-Bold',
+    color: '#163832',
+    align: 'center',
+  });
+  if (variantSize) {
+    fitLine(doc, variantSize, x + pad, y + (compact ? 43 : 48), w - pad * 2, {
+      size: compact ? 5.5 : 6.5,
+      minSize: 4.5,
+      color: '#6b7280',
+      align: 'center',
+    });
+  }
+};
+
+// "ORIGINHASH" on the left and the code on the right; on a narrow card with a long code, the
+// code (which people type in when a QR won't scan) takes the whole line instead.
+const drawStickerFooter = (doc, x, y, w, code, pad) => {
+  const inner = w - pad * 2;
+  doc.font('Helvetica-Bold');
+  const brandW = doc.fontSize(5).widthOfString('ORIGINHASH');
+  let size = 6;
+  while (size > 4.5 && doc.fontSize(size).widthOfString(code) > inner - brandW - 6) size -= 0.25;
+  if (doc.fontSize(size).widthOfString(code) <= inner - brandW - 6) {
+    doc.fillColor('#163832').fontSize(5).text('ORIGINHASH', x + pad, y + 1, { lineBreak: false });
+    doc.fillColor('#163832').fontSize(size).text(code, x + pad, y, { width: inner, align: 'right', lineBreak: false });
+  } else {
+    fitLine(doc, code, x + pad, y, inner, { size: 6, minSize: 4, font: 'Helvetica-Bold', color: '#163832', align: 'center' });
+  }
+};
+
+const drawSticker = async (doc, x, y, layout, sticker) => {
+  const { w, h } = layout;
+  const { splitType, code, imageBuffer, qrBuffer } = sticker;
+  const tall = splitType === 'horizontal-50-50';
+
+  doc.roundedRect(x, y, w, h, 6).lineWidth(1).stroke('#e7ddcc');
+  drawStickerHeader(doc, x, y, w, sticker, tall);
+
+  if (tall) {
+    // Image across the top, QR centred below it. No background behind the image, so photos
+    // narrower than the box sit on the white card instead of between beige bars.
+    const pad = 8;
+    const imageTop = y + 52;
+    const imageH = 48;
+    if (imageBuffer) {
+      doc.image(imageBuffer, x + pad, imageTop, { fit: [w - pad * 2, imageH], align: 'center', valign: 'center' });
+    }
+    const qrSize = 62;
+    doc.image(qrBuffer, x + (w - qrSize) / 2, imageTop + imageH + 5, { width: qrSize, height: qrSize });
+    drawStickerFooter(doc, x, y + h - 13, w, code, 7);
+    return;
+  }
+
+  // Image on the left, QR on the right.
+  const bodyTop = y + 58;
+  const bodyHeight = h - 58 - 16;
+  const bodyPad = 10;
+  const halfW = (w - bodyPad * 2 - 6) / 2;
+  doc.rect(x + bodyPad, bodyTop, halfW, bodyHeight).fill('#fbf3e7');
+  if (imageBuffer) {
+    doc.image(imageBuffer, x + bodyPad, bodyTop, { fit: [halfW, bodyHeight], align: 'center', valign: 'center' });
+  }
+  const qrX = x + bodyPad + halfW + 6;
+  const qrSize = Math.min(bodyHeight, halfW);
+  doc.image(qrBuffer, qrX + (halfW - qrSize) / 2, bodyTop + (bodyHeight - qrSize) / 2, { width: qrSize, height: qrSize });
+  drawStickerFooter(doc, x, y + h - 14, w, code, 10);
+};
+
+// GET /api/qr-stickers/batches/:id/pdf — laid out on the batch's paper size (A4 unless chosen otherwise).
 const downloadBatchPdf = async (req, res) => {
   try {
     const batch = await QrBatch.findByPk(req.params.id, {
@@ -294,41 +366,46 @@ const downloadBatchPdf = async (req, res) => {
     const packedDate = new Date(batch.createdAt);
     const packedLabel = `${String(packedDate.getDate()).padStart(2, '0')}/${String(packedDate.getMonth() + 1).padStart(2, '0')}/${String(packedDate.getFullYear()).slice(-2)}`;
 
+    const pageSize = batch.pageSize || 'A4';
+    const layout = pageLayout(pageSize, batch.splitType);
+    const pages = Math.max(1, Math.ceil(batch.codes.length / layout.perPage));
+
     res.setHeader('Content-Type', 'application/pdf');
     res.setHeader(
       'Content-Disposition',
-      `attachment; filename="${batch.batchNo.replace(/[^a-zA-Z0-9-]+/g, '_')}-stickers.pdf"`
+      `attachment; filename="${batch.batchNo.replace(/[^a-zA-Z0-9-]+/g, '_')}-stickers-${pageSize}.pdf"`
     );
 
-    const doc = new PDFDocument({ size: 'LETTER', margin: 0 });
+    const doc = new PDFDocument({ size: [layout.width, layout.height], margin: 0, autoFirstPage: false });
     doc.pipe(res);
 
     const imageCache = new Map();
+    const startPage = (page) => {
+      doc.addPage({ size: [layout.width, layout.height], margin: 0 });
+      doc
+        .fillColor('#163832')
+        .fontSize(9)
+        .font('Helvetica-Bold')
+        .text('QR stickers', PAGE_MARGIN, PAGE_MARGIN - 8, { lineBreak: false, continued: true })
+        .fillColor('#6b7280')
+        .font('Helvetica')
+        .text(
+          `  ·  ${batch.producer} · ${batch.productName} · Batch ${batch.batchNo} · ${pageSize} · Page ${page} of ${pages}`,
+          { lineBreak: false }
+        );
+    };
 
-    doc.fillColor('#163832').fontSize(14).font('Helvetica-Bold').text('QR stickers', PAGE_MARGIN, 14);
-    doc
-      .fillColor('#6b7280')
-      .fontSize(8)
-      .font('Helvetica')
-      .text(`${batch.producer} · ${batch.productName} · Batch ${batch.batchNo}`, PAGE_MARGIN, 30);
+    for (const [i, codeRow] of batch.codes.entries()) {
+      const slot = i % layout.perPage;
+      if (slot === 0) startPage(i / layout.perPage + 1);
 
-    let col = 0;
-    let row = 0;
-
-    for (const codeRow of batch.codes) {
-      if (row === ROWS) {
-        doc.addPage();
-        col = 0;
-        row = 0;
-      }
-
-      const x = PAGE_MARGIN + GAP_X + col * (CARD_W + GAP_X);
-      const y = PAGE_MARGIN + GAP_Y + row * (CARD_H + GAP_Y);
+      const x = layout.left + (slot % layout.cols) * (layout.w + GAP);
+      const y = layout.top + Math.floor(slot / layout.cols) * (layout.h + GAP);
 
       const imageBuffer = await fetchImageBuffer(codeRow.imageUrl, imageCache).catch(() => null);
       const qrBuffer = await QRCode.toBuffer(stickerQrPayload(codeRow.code), { margin: 0, width: 300 });
 
-      await drawSticker(doc, x, y, {
+      await drawSticker(doc, x, y, layout, {
         producer: batch.producer,
         productName: batch.productName,
         variantSize: batch.variantSize,
@@ -339,13 +416,8 @@ const downloadBatchPdf = async (req, res) => {
         imageBuffer,
         qrBuffer,
       });
-
-      col += 1;
-      if (col === COLUMNS) {
-        col = 0;
-        row += 1;
-      }
     }
+    if (!batch.codes.length) startPage(1);
 
     doc.end();
   } catch (err) {

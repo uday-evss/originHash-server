@@ -9,6 +9,7 @@ const {
   getSummary,
   listScans,
   getScan,
+  getJourney,
 } = require('../controllers/scanController');
 
 const router = express.Router();
@@ -27,6 +28,7 @@ router.use(protect);
 router.get('/', listScans);
 router.post('/', createScan);
 router.get('/summary', getSummary);
+router.get('/journey/:uuid', getJourney);
 router.get('/:id', getScan);
 router.post('/:id/reveal', revealImage);
 router.post('/:id/report', reportPhoto, reportScan);

@@ -1,11 +1,10 @@
 const crypto = require('crypto');
 const { Op } = require('sequelize');
 const sizeOf = require('image-size');
-const { ImageFolder, ImageAsset } = require('../models');
+const { sequelize, ImageFolder, ImageAsset } = require('../models');
 const { uploadFileToS3 } = require('../services/s3Service');
+const { checkImageQuality } = require('../utils/imageQuality');
 
-const MIN_WIDTH = 800;
-const MIN_HEIGHT = 600;
 const ALLOWED_MIME_TYPES = ['image/jpeg', 'image/png'];
 
 // Mirrors the app's folders 1:1 inside the S3 bucket, e.g. image-stock/Folder A/photo.jpg
@@ -25,6 +24,7 @@ const folderJson = (folder) => ({
 
 const imageJson = (image) => ({
   id: image.id,
+  serialNo: image.serialNo,
   folderId: image.folderId,
   folderName: image.folder ? image.folder.name : undefined,
   fileName: image.fileName,
@@ -139,8 +139,14 @@ const uploadImages = async (req, res) => {
         continue;
       }
 
-      if (!dimensions.width || !dimensions.height || dimensions.width < MIN_WIDTH || dimensions.height < MIN_HEIGHT) {
-        rejected.push({ fileName: file.originalname, reason: `Minimum size is ${MIN_WIDTH}x${MIN_HEIGHT}.` });
+      let problem;
+      try {
+        problem = await checkImageQuality(file.buffer, dimensions);
+      } catch {
+        problem = 'Could not read this image.';
+      }
+      if (problem) {
+        rejected.push({ fileName: file.originalname, reason: problem });
         continue;
       }
 
@@ -153,15 +159,29 @@ const uploadImages = async (req, res) => {
 
       const url = await uploadFileToS3(file, s3FolderPath(folder.name));
 
-      const image = await ImageAsset.create({
-        folderId: folder.id,
-        fileName: file.originalname,
-        url,
-        width: dimensions.width,
-        height: dimensions.height,
-        sizeBytes: file.size,
-        mimeType: file.mimetype,
-        fileHash,
+      // Next number in the sequence; the row lock makes simultaneous uploads take turns.
+      const image = await sequelize.transaction(async (transaction) => {
+        const [last] = await ImageAsset.findAll({
+          attributes: ['id', 'serialNo'],
+          order: [['serialNo', 'DESC']],
+          limit: 1,
+          lock: transaction.LOCK.UPDATE,
+          transaction,
+        });
+        return ImageAsset.create(
+          {
+            serialNo: (last?.serialNo || 0) + 1,
+            folderId: folder.id,
+            fileName: file.originalname,
+            url,
+            width: dimensions.width,
+            height: dimensions.height,
+            sizeBytes: file.size,
+            mimeType: file.mimetype,
+            fileHash,
+          },
+          { transaction }
+        );
       });
 
       created.push(imageJson(image));
@@ -210,21 +230,6 @@ const unblockImage = async (req, res) => {
   }
 };
 
-// DELETE /api/images/:id
-const deleteImage = async (req, res) => {
-  try {
-    const image = await ImageAsset.findByPk(req.params.id);
-    if (!image) {
-      return res.status(404).json({ message: 'Image not found.' });
-    }
-    await image.destroy();
-    return res.status(200).json({ message: 'Image deleted.', id: image.id });
-  } catch (err) {
-    console.error(err);
-    return res.status(500).json({ message: 'Could not delete image.' });
-  }
-};
-
 module.exports = {
   listFolders,
   createFolder,
@@ -232,5 +237,4 @@ module.exports = {
   uploadImages,
   blockImage,
   unblockImage,
-  deleteImage,
 };

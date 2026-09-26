@@ -80,6 +80,7 @@ CREATE TABLE IF NOT EXISTS image_folders (
 
 CREATE TABLE IF NOT EXISTS image_assets (
   id           INT UNSIGNED NOT NULL AUTO_INCREMENT,
+  serial_no    INT UNSIGNED NULL,  -- gap-free image number 1, 2, 3, … in upload order
   folder_id    INT UNSIGNED NOT NULL,
   file_name    VARCHAR(255) NOT NULL,
   url          VARCHAR(500) NOT NULL,
@@ -93,6 +94,7 @@ CREATE TABLE IF NOT EXISTS image_assets (
   updated_at   DATETIME     NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
   PRIMARY KEY (id),
   UNIQUE KEY uq_image_assets_folder_hash (folder_id, file_hash),
+  UNIQUE KEY uq_image_assets_serial (serial_no),
   CONSTRAINT fk_image_assets_folder FOREIGN KEY (folder_id) REFERENCES image_folders (id) ON DELETE CASCADE
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
 
@@ -112,16 +114,20 @@ CREATE TABLE IF NOT EXISTS qr_batches (
   variant_size   VARCHAR(150) NULL,
   batch_no       VARCHAR(80)  NOT NULL,
   split_type     ENUM('vertical-50-50','horizontal-50-50') NOT NULL DEFAULT 'vertical-50-50',
+  page_size      VARCHAR(2)   NULL,  -- 'A4' or 'A3' for the sticker PDF; NULL (older batches) = A4
   number_of_qrs  INT UNSIGNED NOT NULL,
   folder_id      INT UNSIGNED NOT NULL,
+  created_by     INT UNSIGNED NULL,  -- user who generated the batch; sees its stickers' full journeys
   created_at     DATETIME     NOT NULL DEFAULT CURRENT_TIMESTAMP,
   updated_at     DATETIME     NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
   PRIMARY KEY (id),
-  CONSTRAINT fk_qr_batches_folder FOREIGN KEY (folder_id) REFERENCES image_folders (id)
+  CONSTRAINT fk_qr_batches_folder FOREIGN KEY (folder_id) REFERENCES image_folders (id),
+  CONSTRAINT fk_qr_batches_creator FOREIGN KEY (created_by) REFERENCES users (id) ON DELETE SET NULL
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
 
 CREATE TABLE IF NOT EXISTS qr_codes (
   id            INT UNSIGNED NOT NULL AUTO_INCREMENT,
+  uuid          CHAR(36)     NULL,  -- public "QR ID"; filled on server start for older rows
   batch_id      INT UNSIGNED NOT NULL,
   sequence_no   INT UNSIGNED NOT NULL,
   code          VARCHAR(60)  NULL,
@@ -130,6 +136,7 @@ CREATE TABLE IF NOT EXISTS qr_codes (
   updated_at    DATETIME     NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
   PRIMARY KEY (id),
   UNIQUE KEY uq_qr_codes_code (code),
+  UNIQUE KEY uq_qr_codes_uuid (uuid),
   CONSTRAINT fk_qr_codes_batch FOREIGN KEY (batch_id) REFERENCES qr_batches (id) ON DELETE CASCADE
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
 
@@ -155,6 +162,7 @@ CREATE TABLE IF NOT EXISTS qr_codes (
 -- ------------------------------------------------------------
 CREATE TABLE IF NOT EXISTS scans (
   id           INT UNSIGNED NOT NULL AUTO_INCREMENT,
+  uuid         CHAR(36)     NULL,  -- public "Scan ID"; filled on server start for older rows
   user_id      INT UNSIGNED NOT NULL,
   qr_code_id   INT UNSIGNED NULL,
   code         VARCHAR(60)  NULL,
@@ -162,9 +170,11 @@ CREATE TABLE IF NOT EXISTS scans (
   result       VARCHAR(20)  NOT NULL,
   latitude     DECIMAL(9,6) NULL,
   longitude    DECIMAL(9,6) NULL,
+  location_name VARCHAR(255) NULL, -- place name for the coordinates (OpenStreetMap Nominatim)
   image_revealed_at DATETIME NULL,
   created_at   DATETIME     NOT NULL DEFAULT CURRENT_TIMESTAMP,
   PRIMARY KEY (id),
+  UNIQUE KEY uq_scans_uuid (uuid),
   CONSTRAINT fk_scans_user FOREIGN KEY (user_id) REFERENCES users (id) ON DELETE CASCADE,
   CONSTRAINT fk_scans_qr_code FOREIGN KEY (qr_code_id) REFERENCES qr_codes (id) ON DELETE SET NULL
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;

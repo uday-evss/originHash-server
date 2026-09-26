@@ -9,6 +9,13 @@ const ImageAsset = sequelize.define(
       autoIncrement: true,
       primaryKey: true,
     },
+    // Gap-free image number (1, 2, 3, …) in upload order; the id above can skip numbers.
+    serialNo: {
+      type: DataTypes.INTEGER.UNSIGNED,
+      allowNull: false,
+      unique: true,
+      field: 'serial_no',
+    },
     folderId: {
       type: DataTypes.INTEGER.UNSIGNED,
       allowNull: false,

@@ -14,6 +14,9 @@ ImageAsset.belongsTo(ImageFolder, { foreignKey: 'folderId', as: 'folder' });
 ImageFolder.hasMany(QrBatch, { foreignKey: 'folderId', as: 'qrBatches' });
 QrBatch.belongsTo(ImageFolder, { foreignKey: 'folderId', as: 'folder' });
 
+User.hasMany(QrBatch, { foreignKey: 'createdBy', as: 'qrBatches', onDelete: 'SET NULL' });
+QrBatch.belongsTo(User, { foreignKey: 'createdBy', as: 'creator' });
+
 QrBatch.hasMany(QrCode, { foreignKey: 'batchId', as: 'codes', onDelete: 'CASCADE' });
 QrCode.belongsTo(QrBatch, { foreignKey: 'batchId', as: 'batch' });
 

@@ -8,7 +8,6 @@ const {
   uploadImages,
   blockImage,
   unblockImage,
-  deleteImage,
 } = require('../controllers/imageStockController');
 
 const router = express.Router();
@@ -22,9 +21,10 @@ router.post('/folders/:id/images', upload.array('images', 20), uploadImages);
 
 router.get('/images', listImages);
 
-// Blocking/deleting images stays admin+ only — normal users can browse and upload, not moderate.
+// Blocking images stays admin+ only — normal users can browse and upload, not moderate.
+// Images can't be deleted by anyone: printed stickers keep pointing at them (it's the photo
+// buyers compare against). Block an image instead to keep it out of new stickers.
 router.patch('/images/:id/block', adminOnly, blockImage);
 router.patch('/images/:id/unblock', adminOnly, unblockImage);
-router.delete('/images/:id', adminOnly, deleteImage);
 
 module.exports = router;

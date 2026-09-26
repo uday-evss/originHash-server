@@ -9,6 +9,14 @@ const QrCode = sequelize.define(
       autoIncrement: true,
       primaryKey: true,
     },
+    // Public ID shown in the app (the numeric id stays internal). Nullable in the database
+    // for rows written by older servers; utils/migrateScans.js fills any gaps on start.
+    uuid: {
+      type: DataTypes.UUID,
+      defaultValue: DataTypes.UUIDV4,
+      allowNull: false,
+      unique: true,
+    },
     batchId: {
       type: DataTypes.INTEGER.UNSIGNED,
       allowNull: false,

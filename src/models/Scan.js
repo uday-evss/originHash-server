@@ -32,6 +32,14 @@ const Scan = sequelize.define(
       autoIncrement: true,
       primaryKey: true,
     },
+    // Public ID shown in the app (the numeric id stays internal). Nullable in the database
+    // for rows written by older servers; utils/migrateScans.js fills any gaps on start.
+    uuid: {
+      type: DataTypes.UUID,
+      defaultValue: DataTypes.UUIDV4,
+      allowNull: false,
+      unique: true,
+    },
     userId: {
       type: DataTypes.INTEGER.UNSIGNED,
       allowNull: false,
@@ -64,6 +72,12 @@ const Scan = sequelize.define(
     longitude: {
       type: DataTypes.DECIMAL(9, 6),
       allowNull: true,
+    },
+    // Place name for the coordinates ("Shamshabad, Telangana"), filled in shortly after the scan.
+    locationName: {
+      type: DataTypes.STRING(255),
+      allowNull: true,
+      field: 'location_name',
     },
     // Set on the one scan that revealed this sticker's image; a sticker's image is shown only once, ever.
     imageRevealedAt: {
