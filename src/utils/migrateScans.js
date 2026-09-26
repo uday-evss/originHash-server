@@ -45,8 +45,10 @@ const ensureImageSerials = async () => {
     console.log('image_assets.serial_no added.');
   }
 
+  // Images in sample folders stay unnumbered (the folder can be deleted).
   const unnumbered = await sequelize.query(
-    'SELECT id FROM image_assets WHERE serial_no IS NULL ORDER BY created_at, id',
+    `SELECT a.id FROM image_assets a JOIN image_folders f ON f.id = a.folder_id
+     WHERE a.serial_no IS NULL AND f.is_sample = 0 ORDER BY a.created_at, a.id`,
     { type: QueryTypes.SELECT }
   );
   if (!unnumbered.length) return;
@@ -59,6 +61,38 @@ const ensureImageSerials = async () => {
     await sequelize.query('UPDATE image_assets SET serial_no = :next WHERE id = :id', { replacements: { next, id } });
   }
   console.log(`image_assets.serial_no filled for ${unnumbered.length} image(s).`);
+};
+
+// Profile history (user_profile_versions, created by sync). The first time it's empty, every
+// existing user's current details become their version 1, so a later rename still shows the
+// old name. After that, versions are added as users and admins save profiles.
+const ensureProfileHistory = async () => {
+  const [anyVersion] = await sequelize.query('SELECT id FROM user_profile_versions LIMIT 1', {
+    type: QueryTypes.SELECT,
+  });
+  if (!anyVersion) {
+    const [, count] = await sequelize.query(
+      `INSERT INTO user_profile_versions
+         (user_id, version_no, name, email, address, user_type, mobile, source, created_at)
+       SELECT id, 1, NULLIF(TRIM(name), ''), NULLIF(TRIM(email), ''), NULLIF(TRIM(address), ''),
+              user_type, NULLIF(TRIM(mobile), ''), 'system', NOW()
+       FROM users`,
+      { type: QueryTypes.INSERT }
+    );
+    if (count) console.log(`user_profile_versions started for ${count} existing user(s).`);
+  }
+
+  // Which of its creator's versions each batch was generated under. Batches made before this
+  // stay NULL — what their creator was called at the time is unknown.
+  if (!(await columnType('qr_batches', 'creator_profile_version_id'))) {
+    await sequelize.query(
+      'ALTER TABLE qr_batches ADD COLUMN creator_profile_version_id INT UNSIGNED NULL AFTER created_by'
+    );
+    await sequelize.query(
+      'ALTER TABLE qr_batches ADD CONSTRAINT fk_qr_batches_creator_profile FOREIGN KEY (creator_profile_version_id) REFERENCES user_profile_versions (id) ON DELETE SET NULL'
+    );
+    console.log('qr_batches.creator_profile_version_id added.');
+  }
 };
 
 // sequelize.sync() creates missing tables but never changes existing ones, so bring older
@@ -99,6 +133,13 @@ const migrateScans = async () => {
       console.log('qr_batches.created_by added.');
     }
 
+    // Generated sample folders (deletable while unused); every existing folder is a real one.
+    // Before ensureImageSerials, which skips sample folders' images.
+    if (!(await columnType('image_folders', 'is_sample'))) {
+      await sequelize.query('ALTER TABLE image_folders ADD COLUMN is_sample TINYINT(1) NOT NULL DEFAULT 0 AFTER name');
+      console.log('image_folders.is_sample added.');
+    }
+
     await ensureImageSerials();
 
     // Paper size each batch's sticker PDF is laid out for; older batches (NULL) print on A4.
@@ -106,6 +147,8 @@ const migrateScans = async () => {
       await sequelize.query('ALTER TABLE qr_batches ADD COLUMN page_size VARCHAR(2) NULL AFTER split_type');
       console.log('qr_batches.page_size added.');
     }
+
+    await ensureProfileHistory();
   } catch (err) {
     // Keep the API up; the new columns only add detail to scans and stickers.
     console.error('Could not migrate the database:', err.message);

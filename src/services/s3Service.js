@@ -71,4 +71,26 @@ const uploadFileToS3 = async (file, customFolder = null) => {
   return uploaded.Location || `${baseUrl}/${fileName}`;
 };
 
-module.exports = { uploadFileToS3 };
+// The object key behind a URL from uploadFileToS3 (virtual-hosted or path-style), or null.
+const keyFromUrl = (url, bucket) => {
+  try {
+    const path = decodeURIComponent(new URL(url).pathname).replace(/^\/+/, '');
+    return path.startsWith(`${bucket}/`) ? path.slice(bucket.length + 1) : path || null;
+  } catch {
+    return null;
+  }
+};
+
+// Deletes files uploaded by uploadFileToS3, given their URLs. Only keys under `prefix` are
+// touched, so a stray URL can never remove anything else in the bucket.
+const deleteFilesFromS3 = async (urls, prefix) => {
+  const { bucket } = getAwsConfig();
+  const keys = urls.map((url) => keyFromUrl(url, bucket)).filter((key) => key && key.startsWith(prefix));
+  for (let i = 0; i < keys.length; i += 1000) {
+    const Objects = keys.slice(i, i + 1000).map((Key) => ({ Key }));
+    await s3().deleteObjects({ Bucket: bucket, Delete: { Objects, Quiet: true } }).promise();
+  }
+  return keys.length;
+};
+
+module.exports = { uploadFileToS3, deleteFilesFromS3 };

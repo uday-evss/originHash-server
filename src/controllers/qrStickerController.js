@@ -3,8 +3,9 @@ const sharp = require('sharp');
 const PDFDocument = require('pdfkit');
 const QRCode = require('qrcode');
 const { Op } = require('sequelize');
-const { QrBatch, QrCode, ImageFolder, ImageAsset } = require('../models');
-const { canSeeFullJourney } = require('../utils/roles');
+const { QrBatch, QrCode, ImageFolder, ImageAsset, User, UserProfileVersion } = require('../models');
+const { canSeeFullJourney, isAdminUser } = require('../utils/roles');
+const { TRACKED_FIELDS, profileChanges, recordProfileVersion } = require('../utils/profileHistory');
 
 // Stickers only ever show this photo at business-card size, so re-encode it small
 // before embedding — otherwise a batch's PDF balloons to tens of MB per full-res photo.
@@ -42,6 +43,24 @@ const batchJson = (batch) => ({
   folderName: batch.folder ? batch.folder.name : undefined,
   createdAt: batch.createdAt,
 });
+
+// For admins: who generated a batch, the details they had at the time, and what has changed
+// since — so batches made as "Harish" and as "Kumar" read as the same person. Needs the batch's
+// `creator` and `creatorProfile` loaded.
+const batchCreatorJson = (batch) => {
+  if (!batch?.createdBy) return null;
+  const { creator, creatorProfile } = batch;
+  return {
+    userId: batch.createdBy,
+    name: creator?.name || null,
+    username: creator?.username || null,
+    mobile: creator?.mobile || null,
+    generatedAs: creatorProfile
+      ? Object.fromEntries([...TRACKED_FIELDS, 'versionNo'].map((field) => [field, creatorProfile[field]]))
+      : null,
+    changedSince: creatorProfile && creator ? profileChanges(creatorProfile, creator) : [],
+  };
+};
 
 const codeJson = (code) => ({
   id: code.id,
@@ -93,6 +112,9 @@ const createBatch = async (req, res) => {
       return res.status(400).json({ message: 'Selected folder has no available (unblocked) images.' });
     }
 
+    // Pin the creator's details as they are right now, so a later rename can't blur who made this.
+    const creatorProfile = await recordProfileVersion(req.user, { source: 'system' });
+
     const batch = await QrBatch.create({
       producer: producer.trim(),
       productName: productName.trim(),
@@ -103,6 +125,7 @@ const createBatch = async (req, res) => {
       numberOfQrs: count,
       folderId,
       createdBy: req.user.id,
+      creatorProfileVersionId: creatorProfile.id,
     });
 
     const codes = [];
@@ -146,22 +169,29 @@ const listCodes = async (req, res) => {
     if (producer) where['$batch.producer$'] = producer;
     if (batchNo) where['$batch.batch_no$'] = batchNo;
 
+    // Only admins see who generated each batch.
+    const isAdmin = isAdminUser(req.user);
+    const batchIncludes = [{ model: ImageFolder, as: 'folder', attributes: ['name'] }];
+    if (isAdmin) {
+      batchIncludes.push(
+        { model: User, as: 'creator', attributes: ['id', 'username', ...TRACKED_FIELDS] },
+        { model: UserProfileVersion, as: 'creatorProfile' }
+      );
+    }
+
     const codes = await QrCode.findAll({
       where,
-      include: [
-        {
-          model: QrBatch,
-          as: 'batch',
-          required: true,
-          include: [{ model: ImageFolder, as: 'folder', attributes: ['name'] }],
-        },
-      ],
+      include: [{ model: QrBatch, as: 'batch', required: true, include: batchIncludes }],
       order: [['created_at', 'DESC']],
       subQuery: false,
     });
 
     return res.status(200).json({
-      codes: codes.map((code) => ({ ...codeJson(code), canViewJourney: canSeeFullJourney(req.user, code) })),
+      codes: codes.map((code) => ({
+        ...codeJson(code),
+        canViewJourney: canSeeFullJourney(req.user, code),
+        ...(isAdmin && { creator: batchCreatorJson(code.batch) }),
+      })),
     });
   } catch (err) {
     console.error(err);

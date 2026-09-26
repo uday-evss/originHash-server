@@ -14,6 +14,14 @@ const ImageFolder = sequelize.define(
       allowNull: false,
       unique: true,
     },
+    // Made by "Generate sample folder" (10 stock photos for trying things out). Only these can
+    // be deleted, and only while no QR batch has used them.
+    isSample: {
+      type: DataTypes.BOOLEAN,
+      allowNull: false,
+      defaultValue: false,
+      field: 'is_sample',
+    },
   },
   {
     tableName: 'image_folders',

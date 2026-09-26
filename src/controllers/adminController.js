@@ -1,7 +1,8 @@
 const bcrypt = require('bcryptjs');
 const { Op } = require('sequelize');
-const { User } = require('../models');
+const { sequelize, User } = require('../models');
 const { publicUser } = require('./authController');
+const { recordProfileVersion } = require('../utils/profileHistory');
 
 // GET /api/admins  (super-admin only) ?search=
 const listAdmins = async (req, res) => {
@@ -45,15 +46,22 @@ const createAdmin = async (req, res) => {
 
     const passwordHash = await bcrypt.hash(password, 10);
 
-    const admin = await User.create({
-      username: username.trim(),
-      passwordHash,
-      name,
-      email,
-      isAdmin: true,
-      isSuperAdmin: Boolean(isSuperAdmin),
-      isBlocked: false,
-      profileCompleted: true,
+    const admin = await sequelize.transaction(async (transaction) => {
+      const created = await User.create(
+        {
+          username: username.trim(),
+          passwordHash,
+          name,
+          email,
+          isAdmin: true,
+          isSuperAdmin: Boolean(isSuperAdmin),
+          isBlocked: false,
+          profileCompleted: true,
+        },
+        { transaction }
+      );
+      await recordProfileVersion(created, { source: 'admin', changedBy: req.user.id, transaction });
+      return created;
     });
 
     return res.status(201).json({ message: 'Admin created.', admin: publicUser(admin) });
@@ -102,7 +110,10 @@ const updateAdmin = async (req, res) => {
     if (isSuperAdmin !== undefined) admin.isSuperAdmin = Boolean(isSuperAdmin);
     if (isBlocked !== undefined) admin.isBlocked = Boolean(isBlocked);
 
-    await admin.save();
+    await sequelize.transaction(async (transaction) => {
+      await admin.save({ transaction });
+      await recordProfileVersion(admin, { source: 'admin', changedBy: req.user.id, transaction });
+    });
 
     return res.status(200).json({ message: 'Admin updated.', admin: publicUser(admin) });
   } catch (err) {
@@ -181,7 +192,10 @@ const demoteAdmin = async (req, res) => {
     admin.isSuperAdmin = false;
     admin.username = null;
     admin.passwordHash = null;
-    await admin.save();
+    await sequelize.transaction(async (transaction) => {
+      await admin.save({ transaction });
+      await recordProfileVersion(admin, { source: 'admin', changedBy: req.user.id, transaction });
+    });
 
     return res.status(200).json({ message: 'Admin demoted to normal user.', user: publicUser(admin) });
   } catch (err) {

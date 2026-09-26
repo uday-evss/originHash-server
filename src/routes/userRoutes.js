@@ -10,6 +10,7 @@ const {
   updateUser,
   blockUser,
   unblockUser,
+  getUserHistory,
 } = require('../controllers/userController');
 
 const router = express.Router();
@@ -25,5 +26,6 @@ router.post('/', protect, adminOnly, createUser);
 router.put('/:id', protect, adminOnly, updateUser);
 router.patch('/:id/block', protect, adminOnly, blockUser);
 router.patch('/:id/unblock', protect, adminOnly, unblockUser);
+router.get('/:id/history', protect, adminOnly, getUserHistory);
 
 module.exports = router;

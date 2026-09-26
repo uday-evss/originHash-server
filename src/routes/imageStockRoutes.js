@@ -4,6 +4,8 @@ const upload = require('../middleware/upload');
 const {
   listFolders,
   createFolder,
+  createSampleFolder,
+  deleteFolder,
   listImages,
   uploadImages,
   blockImage,
@@ -26,5 +28,10 @@ router.get('/images', listImages);
 // buyers compare against). Block an image instead to keep it out of new stickers.
 router.patch('/images/:id/block', adminOnly, blockImage);
 router.patch('/images/:id/unblock', adminOnly, unblockImage);
+
+// Admin+ test data: a randomly named folder of 10 photos (dog, cat, human, peacock, lion, …).
+// These sample folders are the one exception to "no deleting" — and only until a QR batch uses one.
+router.post('/folders/sample', adminOnly, createSampleFolder);
+router.delete('/folders/:id', adminOnly, deleteFolder);
 
 module.exports = router;

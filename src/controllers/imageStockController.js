@@ -1,11 +1,13 @@
 const crypto = require('crypto');
 const { Op } = require('sequelize');
 const sizeOf = require('image-size');
-const { sequelize, ImageFolder, ImageAsset } = require('../models');
-const { uploadFileToS3 } = require('../services/s3Service');
+const { sequelize, ImageFolder, ImageAsset, QrBatch } = require('../models');
+const { uploadFileToS3, deleteFilesFromS3 } = require('../services/s3Service');
+const { sampleCandidates, downloadPhoto } = require('../services/sampleImages');
 const { checkImageQuality } = require('../utils/imageQuality');
 
 const ALLOWED_MIME_TYPES = ['image/jpeg', 'image/png'];
+const SAMPLE_IMAGE_COUNT = 10;
 
 // Mirrors the app's folders 1:1 inside the S3 bucket, e.g. image-stock/Folder A/photo.jpg
 const s3FolderPath = (folderName) => {
@@ -16,6 +18,7 @@ const s3FolderPath = (folderName) => {
 const folderJson = (folder) => ({
   id: folder.id,
   name: folder.name,
+  isSample: Boolean(folder.isSample),
   imagesCount: folder.get('imagesCount') != null ? Number(folder.get('imagesCount')) : undefined,
   availableImagesCount:
     folder.get('availableImagesCount') != null ? Number(folder.get('availableImagesCount')) : undefined,
@@ -109,6 +112,63 @@ const listImages = async (req, res) => {
   }
 };
 
+// Checks one image and, if it passes, stores it in the folder (S3 + database). Resolves to
+// { image } or { reason } for a rejection; S3/database failures throw.
+// `file` is shaped like a multer upload: { buffer, originalname, mimetype, size }.
+const saveImage = async (folder, file) => {
+  if (!ALLOWED_MIME_TYPES.includes(file.mimetype)) {
+    return { reason: 'Only JPG or PNG images are allowed.' };
+  }
+
+  let dimensions;
+  try {
+    dimensions = sizeOf(file.buffer);
+  } catch {
+    return { reason: 'Could not read image dimensions.' };
+  }
+
+  let problem;
+  try {
+    problem = await checkImageQuality(file.buffer, dimensions);
+  } catch {
+    problem = 'Could not read this image.';
+  }
+  if (problem) return { reason: problem };
+
+  const fileHash = crypto.createHash('md5').update(file.buffer).digest('hex');
+  const duplicate = await ImageAsset.findOne({ where: { folderId: folder.id, fileHash } });
+  if (duplicate) return { reason: 'Duplicate image — already in this folder.' };
+
+  const url = await uploadFileToS3(file, s3FolderPath(folder.name));
+
+  const fields = {
+    folderId: folder.id,
+    fileName: file.originalname,
+    url,
+    width: dimensions.width,
+    height: dimensions.height,
+    sizeBytes: file.size,
+    mimeType: file.mimetype,
+    fileHash,
+  };
+
+  // Sample folders can be deleted, so their images stay out of the gap-free numbering.
+  if (folder.isSample) return { image: await ImageAsset.create({ ...fields, serialNo: null }) };
+
+  // Next number in the sequence; the row lock makes simultaneous uploads take turns.
+  const image = await sequelize.transaction(async (transaction) => {
+    const [last] = await ImageAsset.findAll({
+      attributes: ['id', 'serialNo'],
+      order: [['serialNo', 'DESC']],
+      limit: 1,
+      lock: transaction.LOCK.UPDATE,
+      transaction,
+    });
+    return ImageAsset.create({ ...fields, serialNo: (last?.serialNo || 0) + 1 }, { transaction });
+  });
+  return { image };
+};
+
 // POST /api/image-folders/:id/images  (multipart, field "images", up to 20 files)
 const uploadImages = async (req, res) => {
   try {
@@ -126,65 +186,12 @@ const uploadImages = async (req, res) => {
     const rejected = [];
 
     for (const file of files) {
-      if (!ALLOWED_MIME_TYPES.includes(file.mimetype)) {
-        rejected.push({ fileName: file.originalname, reason: 'Only JPG or PNG images are allowed.' });
-        continue;
+      const { image, reason } = await saveImage(folder, file);
+      if (image) {
+        created.push(imageJson(image));
+      } else {
+        rejected.push({ fileName: file.originalname, reason });
       }
-
-      let dimensions;
-      try {
-        dimensions = sizeOf(file.buffer);
-      } catch {
-        rejected.push({ fileName: file.originalname, reason: 'Could not read image dimensions.' });
-        continue;
-      }
-
-      let problem;
-      try {
-        problem = await checkImageQuality(file.buffer, dimensions);
-      } catch {
-        problem = 'Could not read this image.';
-      }
-      if (problem) {
-        rejected.push({ fileName: file.originalname, reason: problem });
-        continue;
-      }
-
-      const fileHash = crypto.createHash('md5').update(file.buffer).digest('hex');
-      const duplicate = await ImageAsset.findOne({ where: { folderId: folder.id, fileHash } });
-      if (duplicate) {
-        rejected.push({ fileName: file.originalname, reason: 'Duplicate image — already in this folder.' });
-        continue;
-      }
-
-      const url = await uploadFileToS3(file, s3FolderPath(folder.name));
-
-      // Next number in the sequence; the row lock makes simultaneous uploads take turns.
-      const image = await sequelize.transaction(async (transaction) => {
-        const [last] = await ImageAsset.findAll({
-          attributes: ['id', 'serialNo'],
-          order: [['serialNo', 'DESC']],
-          limit: 1,
-          lock: transaction.LOCK.UPDATE,
-          transaction,
-        });
-        return ImageAsset.create(
-          {
-            serialNo: (last?.serialNo || 0) + 1,
-            folderId: folder.id,
-            fileName: file.originalname,
-            url,
-            width: dimensions.width,
-            height: dimensions.height,
-            sizeBytes: file.size,
-            mimeType: file.mimetype,
-            fileHash,
-          },
-          { transaction }
-        );
-      });
-
-      created.push(imageJson(image));
     }
 
     return res.status(201).json({
@@ -195,6 +202,136 @@ const uploadImages = async (req, res) => {
   } catch (err) {
     console.error(err);
     return res.status(500).json({ message: err.message || 'Could not upload images.' });
+  }
+};
+
+// Removes a deleted folder's files from S3. Best effort: its database rows are already gone, so
+// a failure here only leaves unreferenced files in the bucket.
+const deleteFolderFiles = async (folder, urls) => {
+  try {
+    await deleteFilesFromS3(urls, `${s3FolderPath(folder.name)}/`);
+  } catch (err) {
+    console.error(`Could not delete the S3 files of ${folder.name}:`, err.message);
+  }
+};
+
+// A random, unused name like "Sample-3FA91C".
+const sampleFolderName = async () => {
+  for (;;) {
+    const name = `Sample-${crypto.randomBytes(3).toString('hex').toUpperCase()}`;
+    if (!(await ImageFolder.findOne({ where: { name } }))) return name;
+  }
+};
+
+// POST /api/image-stock/folders/sample  (admin) — a new, randomly named folder with one photo
+// from each of SAMPLE_IMAGE_COUNT random categories (dog, cat, human, peacock, lion, …). The
+// photos go through the same checks and storage as uploads.
+const createSampleFolder = async (req, res) => {
+  let candidates;
+  try {
+    candidates = await sampleCandidates();
+  } catch (err) {
+    console.error('Could not load sample photos:', err.message);
+    return res.status(502).json({ message: 'Could not reach iNaturalist for sample photos. Try again in a minute.' });
+  }
+
+  let folder;
+  try {
+    folder = await ImageFolder.create({ name: await sampleFolderName(), isSample: true });
+
+    // Start the first photo of each chosen category downloading at once; more are only fetched
+    // when one fails or is rejected.
+    const firstDownloads = candidates
+      .slice(0, SAMPLE_IMAGE_COUNT)
+      .map(({ category, photos }) => downloadPhoto(photos[0], `${category}.jpg`).catch(() => null));
+
+    const created = [];
+    const skipped = [];
+    for (const [index, { category, photos }] of candidates.entries()) {
+      if (created.length === SAMPLE_IMAGE_COUNT) break;
+
+      let reason = 'No usable photo.';
+      for (const [attempt, photo] of photos.slice(0, 3).entries()) {
+        const file =
+          attempt === 0 && index < firstDownloads.length
+            ? await firstDownloads[index]
+            : await downloadPhoto(photo, `${category}.jpg`).catch(() => null);
+        if (!file) {
+          reason = 'Could not download the photo.';
+          continue;
+        }
+        const result = await saveImage(folder, file);
+        if (result.image) {
+          created.push(imageJson({ ...result.image.get(), folder }));
+          reason = null;
+          break;
+        }
+        reason = result.reason;
+      }
+      if (reason) skipped.push({ category, reason });
+    }
+
+    if (!created.length) {
+      await folder.destroy();
+      return res.status(502).json({ message: 'Could not fetch any sample photos. Try again in a minute.', skipped });
+    }
+
+    return res.status(201).json({
+      message: `${folder.name} created with ${created.length} images.`,
+      folder: { ...folderJson(folder), imagesCount: created.length, availableImagesCount: created.length },
+      images: created,
+      skipped,
+    });
+  } catch (err) {
+    console.error(err);
+    // Don't leave a half-filled sample folder behind (e.g. when S3 isn't configured).
+    if (folder) {
+      const images = await ImageAsset.findAll({ where: { folderId: folder.id }, attributes: ['url'] }).catch(() => []);
+      await ImageAsset.destroy({ where: { folderId: folder.id } }).catch(() => {});
+      await folder.destroy().catch(() => {});
+      await deleteFolderFiles(folder, images.map((image) => image.url));
+    }
+    return res.status(500).json({ message: err.message || 'Could not generate a sample folder.' });
+  }
+};
+
+// DELETE /api/image-stock/folders/:id  (admin) — generated sample folders only, and only while
+// no QR batch has used them. Any other image may be printed on stickers; block those instead.
+const deleteFolder = async (req, res) => {
+  try {
+    const result = await sequelize.transaction(async (transaction) => {
+      const folder = await ImageFolder.findByPk(req.params.id, { transaction, lock: transaction.LOCK.UPDATE });
+      if (!folder) return { status: 404, message: 'Folder not found.' };
+      if (!folder.isSample) {
+        return {
+          status: 403,
+          message: 'Only generated sample folders can be deleted. Block images you no longer want instead.',
+        };
+      }
+
+      const batches = await QrBatch.count({ where: { folderId: folder.id }, transaction });
+      if (batches) {
+        return {
+          status: 409,
+          message: `${folder.name} was used for ${batches} QR batch${batches === 1 ? '' : 'es'} — its photos are on those stickers, so it can't be deleted.`,
+        };
+      }
+
+      const images = await ImageAsset.findAll({ where: { folderId: folder.id }, attributes: ['url'], transaction });
+      await ImageAsset.destroy({ where: { folderId: folder.id }, transaction });
+      await folder.destroy({ transaction });
+      return { status: 200, folder, urls: images.map((image) => image.url) };
+    });
+
+    if (result.status !== 200) {
+      return res.status(result.status).json({ message: result.message });
+    }
+
+    await deleteFolderFiles(result.folder, result.urls);
+    return res.status(200).json({ message: `${result.folder.name} deleted.`, folderId: result.folder.id });
+  } catch (err) {
+    console.error(err);
+    return res.status(500).json({ message: 'Could not delete folder.' });
   }
 };
 
@@ -233,6 +370,8 @@ const unblockImage = async (req, res) => {
 module.exports = {
   listFolders,
   createFolder,
+  createSampleFolder,
+  deleteFolder,
   listImages,
   uploadImages,
   blockImage,

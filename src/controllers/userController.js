@@ -1,9 +1,17 @@
 const { Op } = require('sequelize');
-const { User } = require('../models');
+const { sequelize, User, UserProfileVersion, QrBatch } = require('../models');
 const { publicUser } = require('./authController');
 const { uploadFileToS3 } = require('../services/s3Service');
+const { profileChanges, recordProfileVersion, historySummaries } = require('../utils/profileHistory');
 
 const USER_TYPES = ['farmer', 'retailer', 'distributor', 'supplier', 'consumer'];
+
+// Users as the admin list shows them: public fields plus a summary of past profile changes.
+const withHistory = async (users) => {
+  const summaries = await historySummaries(users.map((u) => u.id));
+  return users.map((u) => ({ ...publicUser(u), profileHistory: summaries.get(u.id) }));
+};
+const withHistoryOne = async (user) => (await withHistory([user]))[0];
 
 // GET /api/users/me
 const getMe = async (req, res) => {
@@ -31,7 +39,10 @@ const updateMe = async (req, res) => {
     }
 
     user.profileCompleted = true;
-    await user.save();
+    await sequelize.transaction(async (transaction) => {
+      await user.save({ transaction });
+      await recordProfileVersion(user, { source: 'self', changedBy: user.id, transaction });
+    });
 
     return res.status(200).json({ message: 'Profile updated.', user: publicUser(user) });
   } catch (err) {
@@ -61,9 +72,19 @@ const listUsers = async (req, res) => {
     const where = { isAdmin: false };
 
     if (search) {
+      const pattern = `%${search}%`;
       where[Op.or] = [
-        { name: { [Op.like]: `%${search}%` } },
-        { mobile: { [Op.like]: `%${search}%` } },
+        { name: { [Op.like]: pattern } },
+        { mobile: { [Op.like]: pattern } },
+        // Also match names and numbers the user had before, so searching "Harish" still finds
+        // the account now called Kumar.
+        {
+          id: {
+            [Op.in]: sequelize.literal(
+              `(SELECT user_id FROM user_profile_versions WHERE name LIKE ${sequelize.escape(pattern)} OR mobile LIKE ${sequelize.escape(pattern)})`
+            ),
+          },
+        },
       ];
     }
 
@@ -79,7 +100,7 @@ const listUsers = async (req, res) => {
       total,
       active: total - blocked,
       blocked,
-      users: users.map(publicUser),
+      users: await withHistory(users),
     });
   } catch (err) {
     console.error(err);
@@ -105,19 +126,26 @@ const createUser = async (req, res) => {
       return res.status(400).json({ message: 'Invalid user category.' });
     }
 
-    const user = await User.create({
-      mobile,
-      countryCode: '+91',
-      name,
-      email,
-      userType,
-      address,
-      isAdmin: false,
-      isBlocked: false,
-      profileCompleted: Boolean(name),
+    const user = await sequelize.transaction(async (transaction) => {
+      const created = await User.create(
+        {
+          mobile,
+          countryCode: '+91',
+          name,
+          email,
+          userType,
+          address,
+          isAdmin: false,
+          isBlocked: false,
+          profileCompleted: Boolean(name),
+        },
+        { transaction }
+      );
+      await recordProfileVersion(created, { source: 'admin', changedBy: req.user.id, transaction });
+      return created;
     });
 
-    return res.status(201).json({ message: 'User added.', user: publicUser(user) });
+    return res.status(201).json({ message: 'User added.', user: await withHistoryOne(user) });
   } catch (err) {
     console.error(err);
     return res.status(500).json({ message: 'Could not add user.' });
@@ -152,9 +180,12 @@ const updateUser = async (req, res) => {
     if (userType !== undefined) user.userType = userType;
     if (address !== undefined) user.address = address;
 
-    await user.save();
+    await sequelize.transaction(async (transaction) => {
+      await user.save({ transaction });
+      await recordProfileVersion(user, { source: 'admin', changedBy: req.user.id, transaction });
+    });
 
-    return res.status(200).json({ message: 'User updated.', user: publicUser(user) });
+    return res.status(200).json({ message: 'User updated.', user: await withHistoryOne(user) });
   } catch (err) {
     console.error(err);
     return res.status(500).json({ message: 'Could not update user.' });
@@ -170,7 +201,7 @@ const blockUser = async (req, res) => {
     }
     user.isBlocked = true;
     await user.save();
-    return res.status(200).json({ message: 'User blocked.', user: publicUser(user) });
+    return res.status(200).json({ message: 'User blocked.', user: await withHistoryOne(user) });
   } catch (err) {
     console.error(err);
     return res.status(500).json({ message: 'Could not block user.' });
@@ -186,10 +217,60 @@ const unblockUser = async (req, res) => {
     }
     user.isBlocked = false;
     await user.save();
-    return res.status(200).json({ message: 'User unblocked.', user: publicUser(user) });
+    return res.status(200).json({ message: 'User unblocked.', user: await withHistoryOne(user) });
   } catch (err) {
     console.error(err);
     return res.status(500).json({ message: 'Could not unblock user.' });
+  }
+};
+
+// GET /api/users/:id/history  (admin only) — every version of the user's details, oldest
+// first, with what changed in each, and the QR batches they generated under each version.
+const getUserHistory = async (req, res) => {
+  try {
+    const user = await User.findByPk(req.params.id);
+    if (!user) {
+      return res.status(404).json({ message: 'User not found.' });
+    }
+
+    const [versions, batches] = await Promise.all([
+      UserProfileVersion.findAll({
+        where: { userId: user.id },
+        include: [{ model: User, as: 'editor', attributes: ['id', 'name', 'username'] }],
+        order: [['versionNo', 'ASC']],
+      }),
+      QrBatch.findAll({ where: { createdBy: user.id }, order: [['createdAt', 'DESC']] }),
+    ]);
+
+    return res.status(200).json({
+      user: publicUser(user),
+      versions: versions.map((v, i) => ({
+        id: v.id,
+        versionNo: v.versionNo,
+        name: v.name,
+        email: v.email,
+        address: v.address,
+        userType: v.userType,
+        mobile: v.mobile,
+        source: v.source,
+        changedBy: v.editor ? { id: v.editor.id, name: v.editor.name || v.editor.username } : null,
+        changes: i === 0 ? [] : profileChanges(versions[i - 1], v),
+        createdAt: v.createdAt,
+      })),
+      batches: batches.map((b) => ({
+        id: b.id,
+        producer: b.producer,
+        productName: b.productName,
+        variantSize: b.variantSize,
+        batchNo: b.batchNo,
+        numberOfQrs: b.numberOfQrs,
+        profileVersionId: b.creatorProfileVersionId,
+        createdAt: b.createdAt,
+      })),
+    });
+  } catch (err) {
+    console.error(err);
+    return res.status(500).json({ message: 'Could not load profile history.' });
   }
 };
 
@@ -202,4 +283,5 @@ module.exports = {
   updateUser,
   blockUser,
   unblockUser,
+  getUserHistory,
 };

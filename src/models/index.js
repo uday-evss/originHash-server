@@ -7,6 +7,7 @@ const QrBatch = require('./QrBatch');
 const QrCode = require('./QrCode');
 const Scan = require('./Scan');
 const ScanReport = require('./ScanReport');
+const UserProfileVersion = require('./UserProfileVersion');
 
 ImageFolder.hasMany(ImageAsset, { foreignKey: 'folderId', as: 'images', onDelete: 'CASCADE' });
 ImageAsset.belongsTo(ImageFolder, { foreignKey: 'folderId', as: 'folder' });
@@ -16,6 +17,14 @@ QrBatch.belongsTo(ImageFolder, { foreignKey: 'folderId', as: 'folder' });
 
 User.hasMany(QrBatch, { foreignKey: 'createdBy', as: 'qrBatches', onDelete: 'SET NULL' });
 QrBatch.belongsTo(User, { foreignKey: 'createdBy', as: 'creator' });
+
+User.hasMany(UserProfileVersion, { foreignKey: 'userId', as: 'profileVersions', onDelete: 'CASCADE' });
+UserProfileVersion.belongsTo(User, { foreignKey: 'userId', as: 'user' });
+// The admin behind an 'admin' change; the history row stays if that admin is deleted.
+UserProfileVersion.belongsTo(User, { foreignKey: 'changedBy', as: 'editor', onDelete: 'SET NULL' });
+
+UserProfileVersion.hasMany(QrBatch, { foreignKey: 'creatorProfileVersionId', as: 'qrBatches', onDelete: 'SET NULL' });
+QrBatch.belongsTo(UserProfileVersion, { foreignKey: 'creatorProfileVersionId', as: 'creatorProfile' });
 
 QrBatch.hasMany(QrCode, { foreignKey: 'batchId', as: 'codes', onDelete: 'CASCADE' });
 QrCode.belongsTo(QrBatch, { foreignKey: 'batchId', as: 'batch' });
@@ -40,4 +49,5 @@ module.exports = {
   QrCode,
   Scan,
   ScanReport,
+  UserProfileVersion,
 };

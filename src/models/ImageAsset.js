@@ -10,9 +10,10 @@ const ImageAsset = sequelize.define(
       primaryKey: true,
     },
     // Gap-free image number (1, 2, 3, …) in upload order; the id above can skip numbers.
+    // NULL for images in generated sample folders, which can be deleted.
     serialNo: {
       type: DataTypes.INTEGER.UNSIGNED,
-      allowNull: false,
+      allowNull: true,
       unique: true,
       field: 'serial_no',
     },

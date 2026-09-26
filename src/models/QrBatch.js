@@ -58,6 +58,14 @@ const QrBatch = sequelize.define(
       allowNull: true,
       field: 'created_by',
     },
+    // The creator's details (name, email, …) as they were when the batch was generated, so a
+    // later rename doesn't make it look like someone else made it. NULL on batches made before
+    // profile history was kept.
+    creatorProfileVersionId: {
+      type: DataTypes.INTEGER.UNSIGNED,
+      allowNull: true,
+      field: 'creator_profile_version_id',
+    },
   },
   {
     tableName: 'qr_batches',
