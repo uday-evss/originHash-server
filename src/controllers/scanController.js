@@ -1,10 +1,15 @@
 const { Op } = require('sequelize');
-const { sequelize, QrBatch, QrCode, Scan } = require('../models');
+const { sequelize, QrBatch, QrCode, Scan, ScanReport, User } = require('../models');
+const { uploadFileToS3 } = require('../services/s3Service');
 
 const ACTIONS = ['record', 'verify'];
 const RECENT_LIMIT = 5;
+const REPORT_NOTE_MAX = 1000;
 const SUCCEEDED = ['MATCHED', 'AUTHENTIC'];
 const FAILED = ['UNMATCHED', 'NOT_FOUND', 'INVALID', 'ALREADY_VIEWED'];
+const HISTORY_FILTERS = { all: null, verified: SUCCEEDED, failed: FAILED, scanned: ['SCANNED'] };
+const HISTORY_PAGE = 20;
+const JOURNEY_LIMIT = 50;
 
 const toCoordinate = (value, limit) => {
   const n = Number(value);
@@ -33,6 +38,12 @@ const scanJson = (scan) => ({
   createdAt: scan.createdAt,
 });
 
+// MySQL returns DECIMAL columns as strings.
+const locationJson = (scan) =>
+  scan.latitude !== null && scan.longitude !== null
+    ? { latitude: Number(scan.latitude), longitude: Number(scan.longitude) }
+    : null;
+
 // The earliest scan that revealed this sticker's image, if any (other than `exceptId`).
 const firstReveal = (qrCodeId, exceptId, transaction) =>
   Scan.findOne({
@@ -45,10 +56,16 @@ const firstReveal = (qrCodeId, exceptId, transaction) =>
     transaction,
   });
 
-const findOwnScan = (req) =>
+const reportJson = (report) => ({
+  note: report.note,
+  photoUrl: report.photoUrl,
+  createdAt: report.createdAt,
+});
+
+const findOwnScan = (req, include = []) =>
   Scan.findOne({
     where: { id: req.params.id, userId: req.user.id },
-    include: [{ model: QrCode, as: 'qrCode', include: [{ model: QrBatch, as: 'batch' }] }],
+    include: [{ model: QrCode, as: 'qrCode', include: [{ model: QrBatch, as: 'batch' }] }, ...include],
   });
 
 // POST /api/scans  { code, action: 'record' | 'verify', latitude?, longitude? }
@@ -172,6 +189,137 @@ const settleScan = async (req, res) => {
   }
 };
 
+// POST /api/scans/:id/report  multipart: note?, photo? (both optional)
+// On an open verification whose image was revealed, reporting is the user's "Unmatched" answer
+// and closes the scan as UNMATCHED. An ALREADY_VIEWED (or UNMATCHED) scan can be reported as it is.
+const reportScan = async (req, res) => {
+  try {
+    const scan = await findOwnScan(req, [{ model: ScanReport, as: 'report' }]);
+    if (!scan) {
+      return res.status(404).json({ message: 'Scan not found.' });
+    }
+
+    const openAndRevealed = scan.result === 'PENDING' && scan.imageRevealedAt;
+    if (!openAndRevealed && !['ALREADY_VIEWED', 'UNMATCHED'].includes(scan.result)) {
+      return res.status(409).json({ message: 'This scan can no longer be reported.', scan: scanJson(scan) });
+    }
+    if (scan.report) {
+      return res.status(409).json({ message: 'This scan has already been reported.', scan: scanJson(scan) });
+    }
+
+    const note = typeof req.body.note === 'string' ? req.body.note.trim().slice(0, REPORT_NOTE_MAX) || null : null;
+
+    let photoUrl = null;
+    if (req.file) {
+      try {
+        photoUrl = await uploadFileToS3(req.file, 'scan-reports');
+      } catch (err) {
+        console.error(err);
+        return res.status(502).json({ message: "Couldn't upload the photo. Try again, or send the report without it." });
+      }
+    }
+
+    const report = await sequelize.transaction(async (transaction) => {
+      if (openAndRevealed) await scan.update({ result: 'UNMATCHED' }, { transaction });
+      return ScanReport.create({ scanId: scan.id, note, photoUrl }, { transaction });
+    });
+
+    return res.status(201).json({
+      scan: scanJson(scan),
+      product: scan.qrCode ? productJson(scan.qrCode) : null,
+      report: reportJson(report),
+    });
+  } catch (err) {
+    console.error(err);
+    return res.status(500).json({ message: 'Could not send your report.' });
+  }
+};
+
+// GET /api/scans?filter=all|verified|failed|scanned&before=<id> — the user's scan history, newest first.
+const listScans = async (req, res) => {
+  try {
+    const filter = Object.hasOwn(HISTORY_FILTERS, req.query.filter) ? req.query.filter : 'all';
+    const before = Number(req.query.before);
+
+    const where = { userId: req.user.id };
+    if (HISTORY_FILTERS[filter]) where.result = HISTORY_FILTERS[filter];
+    if (Number.isInteger(before) && before > 0) where.id = { [Op.lt]: before };
+
+    const rows = await Scan.findAll({
+      where,
+      include: [{ model: QrCode, as: 'qrCode', include: [{ model: QrBatch, as: 'batch' }] }],
+      order: [['id', 'DESC']],
+      limit: HISTORY_PAGE + 1,
+    });
+
+    return res.status(200).json({
+      scans: rows.slice(0, HISTORY_PAGE).map((scan) => ({
+        ...scanJson(scan),
+        location: locationJson(scan),
+        productName: scan.qrCode?.batch?.productName ?? null,
+        variantSize: scan.qrCode?.batch?.variantSize ?? null,
+        producer: scan.qrCode?.batch?.producer ?? null,
+      })),
+      hasMore: rows.length > HISTORY_PAGE,
+    });
+  } catch (err) {
+    console.error(err);
+    return res.status(500).json({ message: 'Could not load your scan history.' });
+  }
+};
+
+// GET /api/scans/:id — one of the user's scans, with the product, any report, and the product's
+// journey: every "Scan to record" of the same sticker, by anyone, oldest first.
+const getScan = async (req, res) => {
+  try {
+    if (!/^\d+$/.test(req.params.id)) {
+      return res.status(404).json({ message: 'Scan not found.' });
+    }
+    const scan = await findOwnScan(req, [{ model: ScanReport, as: 'report' }]);
+    if (!scan) {
+      return res.status(404).json({ message: 'Scan not found.' });
+    }
+
+    let firstViewedAt = null;
+    let journey = [];
+    let buyerVerifiedAt = null;
+    if (scan.qrCodeId) {
+      const [earlier, records, verified] = await Promise.all([
+        scan.result === 'ALREADY_VIEWED' ? firstReveal(scan.qrCodeId, scan.id) : null,
+        Scan.findAll({
+          where: { qrCodeId: scan.qrCodeId, result: 'SCANNED' },
+          include: [{ model: User, as: 'user', attributes: ['id', 'name', 'userType'] }],
+          order: [['id', 'ASC']],
+          limit: JOURNEY_LIMIT,
+        }),
+        Scan.findOne({ where: { qrCodeId: scan.qrCodeId, result: SUCCEEDED }, order: [['id', 'ASC']] }),
+      ]);
+      firstViewedAt = earlier?.imageRevealedAt ?? null;
+      buyerVerifiedAt = verified?.createdAt ?? null;
+      journey = records.map((record) => ({
+        id: record.id,
+        userName: record.user?.name ?? null,
+        userType: record.user?.userType ?? null,
+        isYou: record.userId === req.user.id,
+        location: locationJson(record),
+        createdAt: record.createdAt,
+      }));
+    }
+
+    return res.status(200).json({
+      scan: { ...scanJson(scan), location: locationJson(scan), qrCodeId: scan.qrCodeId },
+      product: scan.qrCode ? productJson(scan.qrCode) : null,
+      report: scan.report ? reportJson(scan.report) : null,
+      firstViewedAt,
+      journey,
+      buyerVerifiedAt,
+    });
+  } catch (err) {
+    console.error(err);
+    return res.status(500).json({ message: 'Could not load this scan.' });
+  }
+};
+
 // GET /api/scans/summary — the signed-in user's totals and latest scans, for the Home screen.
 // Rolled-back or unanswered verifications count as scans, not as verifications.
 const getSummary = async (req, res) => {
@@ -219,4 +367,4 @@ const getSummary = async (req, res) => {
   }
 };
 
-module.exports = { createScan, revealImage, settleScan, getSummary };
+module.exports = { createScan, revealImage, settleScan, reportScan, getSummary, listScans, getScan };

@@ -170,6 +170,25 @@ CREATE TABLE IF NOT EXISTS scans (
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
 
 -- ------------------------------------------------------------
+-- Table: scan_reports
+-- A user's report about a scanned product: sent with an
+-- "Unmatched" answer (which closes the scan as UNMATCHED) or from
+-- an "Already verified" (ALREADY_VIEWED) result. One per scan;
+-- the note and photo (stored in S3 under scan-reports/) are both
+-- optional.
+-- ------------------------------------------------------------
+CREATE TABLE IF NOT EXISTS scan_reports (
+  id           INT UNSIGNED NOT NULL AUTO_INCREMENT,
+  scan_id      INT UNSIGNED NOT NULL,
+  note         TEXT         NULL,
+  photo_url    VARCHAR(500) NULL,
+  created_at   DATETIME     NOT NULL DEFAULT CURRENT_TIMESTAMP,
+  PRIMARY KEY (id),
+  UNIQUE KEY uq_scan_reports_scan (scan_id),
+  CONSTRAINT fk_scan_reports_scan FOREIGN KEY (scan_id) REFERENCES scans (id) ON DELETE CASCADE
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
+
+-- ------------------------------------------------------------
 -- Seed: default Admin account
 -- Mobile: 7816018884, static login OTP: 8884
 -- (also created automatically by src/utils/seedAdmin.js on boot)
@@ -238,6 +257,18 @@ ON DUPLICATE KEY UPDATE is_admin = 1;
 -- Answer or back out of a verification (PATCH /api/scans/:id):
 -- UPDATE scans SET result = ? WHERE id = ? AND user_id = ? AND result = 'PENDING';
 
+-- Report a product (POST /api/scans/:id/report):
+-- UPDATE scans SET result = 'UNMATCHED' WHERE id = ? AND result = 'PENDING';  -- only for an open verification
+-- INSERT INTO scan_reports (scan_id, note, photo_url, created_at) VALUES (?, ?, ?, NOW());
+
 -- Home screen totals and latest scans (GET /api/scans/summary):
 -- SELECT action, result, COUNT(id) AS count FROM scans WHERE user_id = ? GROUP BY action, result;
 -- SELECT * FROM scans WHERE user_id = ? ORDER BY id DESC LIMIT 5;
+
+-- Scan history, newest first, 20 per page (GET /api/scans?filter=&before=):
+-- SELECT * FROM scans WHERE user_id = ? [AND result IN (...)] [AND id < ?] ORDER BY id DESC LIMIT 21;
+
+-- One scan's details + the sticker's journey (GET /api/scans/:id):
+-- SELECT s.*, u.name, u.user_type FROM scans s JOIN users u ON u.id = s.user_id
+-- WHERE s.qr_code_id = ? AND s.result = 'SCANNED' ORDER BY s.id LIMIT 50;
+-- SELECT * FROM scans WHERE qr_code_id = ? AND result IN ('MATCHED','AUTHENTIC') ORDER BY id LIMIT 1;

@@ -6,6 +6,7 @@ const ImageAsset = require('./ImageAsset');
 const QrBatch = require('./QrBatch');
 const QrCode = require('./QrCode');
 const Scan = require('./Scan');
+const ScanReport = require('./ScanReport');
 
 ImageFolder.hasMany(ImageAsset, { foreignKey: 'folderId', as: 'images', onDelete: 'CASCADE' });
 ImageAsset.belongsTo(ImageFolder, { foreignKey: 'folderId', as: 'folder' });
@@ -23,6 +24,9 @@ Scan.belongsTo(User, { foreignKey: 'userId', as: 'user' });
 QrCode.hasMany(Scan, { foreignKey: 'qrCodeId', as: 'scans', onDelete: 'SET NULL' });
 Scan.belongsTo(QrCode, { foreignKey: 'qrCodeId', as: 'qrCode' });
 
+Scan.hasOne(ScanReport, { foreignKey: 'scanId', as: 'report', onDelete: 'CASCADE' });
+ScanReport.belongsTo(Scan, { foreignKey: 'scanId', as: 'scan' });
+
 module.exports = {
   sequelize,
   User,
@@ -32,4 +36,5 @@ module.exports = {
   QrBatch,
   QrCode,
   Scan,
+  ScanReport,
 };
