@@ -2,6 +2,7 @@ require('dotenv').config();
 const app = require('./app');
 const { sequelize } = require('./models');
 const seedAdmin = require('./utils/seedAdmin');
+const migrateScans = require('./utils/migrateScans');
 
 const PORT = process.env.PORT || 5000;
 
@@ -12,6 +13,8 @@ const start = async () => {
 
     await sequelize.sync(); // creates tables if they don't exist
     console.log('Tables synced.');
+
+    await migrateScans();
 
     await seedAdmin();
 

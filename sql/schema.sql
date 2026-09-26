@@ -135,10 +135,23 @@ CREATE TABLE IF NOT EXISTS qr_codes (
 
 -- ------------------------------------------------------------
 -- Table: scans
--- One row per scan a user completes in the app. action 'record'
--- logs that a product reached this user (supply-chain movement,
--- with the device location when shared); 'verify' checks the QR
--- is genuine. qr_code_id is NULL when the code matched nothing.
+-- One row per scan a user makes in the app.
+-- action 'record' logs that a product reached this user
+-- (supply-chain movement, with the device location when shared):
+--   result SCANNED.
+-- action 'verify' checks a product by revealing its sticker image
+-- once and asking the user whether it matches:
+--   PENDING        started, not answered yet
+--   MATCHED        user confirmed the image matches
+--   UNMATCHED      user said it doesn't match
+--   ROLLED_BACK    user backed out / left before answering
+--   NOT_FOUND      code isn't in qr_codes
+--   INVALID        QR wasn't an OriginHash sticker
+--   ALREADY_VIEWED sticker image was already revealed once
+--   AUTHENTIC      legacy, before the image-match step
+-- image_revealed_at is set on the single scan that revealed a
+-- sticker's image; each sticker's image is shown only once.
+-- qr_code_id is NULL when the code matched nothing.
 -- ------------------------------------------------------------
 CREATE TABLE IF NOT EXISTS scans (
   id           INT UNSIGNED NOT NULL AUTO_INCREMENT,
@@ -146,9 +159,10 @@ CREATE TABLE IF NOT EXISTS scans (
   qr_code_id   INT UNSIGNED NULL,
   code         VARCHAR(60)  NULL,
   action       ENUM('record','verify') NOT NULL,
-  result       ENUM('recorded','authentic','not_found','invalid') NOT NULL,
+  result       VARCHAR(20)  NOT NULL,
   latitude     DECIMAL(9,6) NULL,
   longitude    DECIMAL(9,6) NULL,
+  image_revealed_at DATETIME NULL,
   created_at   DATETIME     NOT NULL DEFAULT CURRENT_TIMESTAMP,
   PRIMARY KEY (id),
   CONSTRAINT fk_scans_user FOREIGN KEY (user_id) REFERENCES users (id) ON DELETE CASCADE,
@@ -214,6 +228,15 @@ ON DUPLICATE KEY UPDATE is_admin = 1;
 -- INSERT INTO scans (user_id, qr_code_id, code, action, result, latitude, longitude, created_at)
 -- VALUES (?, ?, ?, ?, ?, ?, ?, NOW());
 -- UPDATE users SET scans_count = scans_count + 1 WHERE id = ?;
+
+-- Reveal a sticker's image (POST /api/scans/:id/reveal) — refused if it was revealed before:
+-- SELECT * FROM qr_codes WHERE id = ? FOR UPDATE;
+-- SELECT * FROM scans WHERE qr_code_id = ? AND image_revealed_at IS NOT NULL AND id <> ?
+-- ORDER BY image_revealed_at LIMIT 1;
+-- UPDATE scans SET image_revealed_at = NOW() WHERE id = ?;
+
+-- Answer or back out of a verification (PATCH /api/scans/:id):
+-- UPDATE scans SET result = ? WHERE id = ? AND user_id = ? AND result = 'PENDING';
 
 -- Home screen totals and latest scans (GET /api/scans/summary):
 -- SELECT action, result, COUNT(id) AS count FROM scans WHERE user_id = ? GROUP BY action, result;

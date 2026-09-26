@@ -1,6 +1,6 @@
 const express = require('express');
 const { protect } = require('../middleware/auth');
-const { createScan, getSummary } = require('../controllers/scanController');
+const { createScan, revealImage, settleScan, getSummary } = require('../controllers/scanController');
 
 const router = express.Router();
 
@@ -9,5 +9,7 @@ router.use(protect);
 
 router.post('/', createScan);
 router.get('/summary', getSummary);
+router.post('/:id/reveal', revealImage);
+router.patch('/:id', settleScan);
 
 module.exports = router;
