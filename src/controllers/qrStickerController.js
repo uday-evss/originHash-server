@@ -304,11 +304,18 @@ const pageLayout = (pageSize, splitType) => {
   return { ...best, w, h, left: (best.width - gridWidth) / 2, top: PAGE_MARGIN + HEADER_H };
 };
 
+// The photo is printed as a square tile the exact size of the QR, so crop it square here —
+// centred on the most interesting region (faces, the animal) rather than the geometric middle.
 const fetchImageBuffer = async (url, cache) => {
   if (cache.has(url)) return cache.get(url);
   const { data } = await axios.get(url, { responseType: 'arraybuffer' });
-  const resized = await sharp(Buffer.from(data))
-    .resize(STICKER_IMAGE_PX, STICKER_IMAGE_PX, { fit: 'inside', withoutEnlargement: true })
+  const source = Buffer.from(data);
+  const { width = STICKER_IMAGE_PX, height = STICKER_IMAGE_PX } = await sharp(source).metadata();
+  const side = Math.min(STICKER_IMAGE_PX, width, height);
+  const resized = await sharp(source)
+    .rotate() // honour EXIF orientation from phone photos
+    .resize(side, side, { fit: 'cover', position: sharp.strategy.attention })
+    .flatten({ background: '#ffffff' }) // transparent PNGs sit on white, not black
     .jpeg({ quality: 78 })
     .toBuffer();
   cache.set(url, resized);
@@ -325,20 +332,20 @@ const fitLine = (doc, text, x, y, width, { size, minSize = size, font = 'Helveti
 
 const drawStickerHeader = (doc, x, y, w, { producer, batchNo, packedDate, productName, variantSize }, compact) => {
   const pad = compact ? 7 : 10;
-  const bandH = compact ? 28 : 30;
+  const bandH = compact ? 26 : 30;
   doc.rect(x, y, w, bandH).fill('#163832');
-  fitLine(doc, producer.toUpperCase(), x + pad, y + (compact ? 5 : 6), w - pad * 2, {
+  fitLine(doc, producer.toUpperCase(), x + pad, y + (compact ? 4.5 : 6), w - pad * 2, {
     size: compact ? 8 : 9,
     minSize: 6.5,
     font: 'Helvetica-Bold',
     color: '#ffffff',
   });
-  fitLine(doc, `Batch ${batchNo} · Packed ${packedDate}`, x + pad, y + (compact ? 17 : 18), w - pad * 2, {
+  fitLine(doc, `Batch ${batchNo} · Packed ${packedDate}`, x + pad, y + (compact ? 15.5 : 18), w - pad * 2, {
     size: compact ? 5.5 : 6.5,
     minSize: 4.5,
     color: '#c9a464',
   });
-  fitLine(doc, productName, x + pad, y + (compact ? 33 : 36), w - pad * 2, {
+  fitLine(doc, productName, x + pad, y + (compact ? 30 : 36), w - pad * 2, {
     size: compact ? 8 : 9,
     minSize: 6.5,
     font: 'Helvetica-Bold',
@@ -346,7 +353,7 @@ const drawStickerHeader = (doc, x, y, w, { producer, batchNo, packedDate, produc
     align: 'center',
   });
   if (variantSize) {
-    fitLine(doc, variantSize, x + pad, y + (compact ? 43 : 48), w - pad * 2, {
+    fitLine(doc, variantSize, x + pad, y + (compact ? 39.5 : 48), w - pad * 2, {
       size: compact ? 5.5 : 6.5,
       minSize: 4.5,
       color: '#6b7280',
@@ -371,6 +378,17 @@ const drawStickerFooter = (doc, x, y, w, code, pad) => {
   }
 };
 
+// The photo and the QR are always the same square, so the pair reads as one matched set.
+// The photo arrives pre-cropped square (fetchImageBuffer); if it failed to load, a cream
+// placeholder keeps the composition balanced.
+const drawPhotoTile = (doc, imageBuffer, x, y, size) => {
+  if (imageBuffer) {
+    doc.image(imageBuffer, x, y, { width: size, height: size });
+  } else {
+    doc.rect(x, y, size, size).fill('#fbf3e7');
+  }
+};
+
 const drawSticker = async (doc, x, y, layout, sticker) => {
   const { w, h } = layout;
   const { splitType, code, imageBuffer, qrBuffer } = sticker;
@@ -380,33 +398,27 @@ const drawSticker = async (doc, x, y, layout, sticker) => {
   drawStickerHeader(doc, x, y, w, sticker, tall);
 
   if (tall) {
-    // Image across the top, QR centred below it. No background behind the image, so photos
-    // narrower than the box sit on the white card instead of between beige bars.
-    const pad = 8;
-    const imageTop = y + 52;
-    const imageH = 48;
-    if (imageBuffer) {
-      doc.image(imageBuffer, x + pad, imageTop, { fit: [w - pad * 2, imageH], align: 'center', valign: 'center' });
-    }
-    const qrSize = 62;
-    doc.image(qrBuffer, x + (w - qrSize) / 2, imageTop + imageH + 5, { width: qrSize, height: qrSize });
-    drawStickerFooter(doc, x, y + h - 13, w, code, 7);
+    // Photo stacked above the QR, both the same square, centred on the card.
+    const bodyTop = 48;
+    const footerTop = h - 12;
+    const gap = 5;
+    const tile = Math.floor((footerTop - 3 - bodyTop - gap) / 2);
+    const tileX = x + (w - tile) / 2;
+    drawPhotoTile(doc, imageBuffer, tileX, y + bodyTop, tile);
+    doc.image(qrBuffer, tileX, y + bodyTop + tile + gap, { width: tile, height: tile });
+    drawStickerFooter(doc, x, y + footerTop, w, code, 7);
     return;
   }
 
-  // Image on the left, QR on the right.
-  const bodyTop = y + 58;
-  const bodyHeight = h - 58 - 16;
+  // Photo on the left, QR on the right: two equal squares, each centred in its half of the card.
+  const bodyTop = 58;
+  const footerTop = h - 13;
+  const tile = footerTop - 5 - bodyTop;
   const bodyPad = 10;
   const halfW = (w - bodyPad * 2 - 6) / 2;
-  doc.rect(x + bodyPad, bodyTop, halfW, bodyHeight).fill('#fbf3e7');
-  if (imageBuffer) {
-    doc.image(imageBuffer, x + bodyPad, bodyTop, { fit: [halfW, bodyHeight], align: 'center', valign: 'center' });
-  }
-  const qrX = x + bodyPad + halfW + 6;
-  const qrSize = Math.min(bodyHeight, halfW);
-  doc.image(qrBuffer, qrX + (halfW - qrSize) / 2, bodyTop + (bodyHeight - qrSize) / 2, { width: qrSize, height: qrSize });
-  drawStickerFooter(doc, x, y + h - 14, w, code, 10);
+  drawPhotoTile(doc, imageBuffer, x + bodyPad + (halfW - tile) / 2, y + bodyTop, tile);
+  doc.image(qrBuffer, x + bodyPad + halfW + 6 + (halfW - tile) / 2, y + bodyTop, { width: tile, height: tile });
+  drawStickerFooter(doc, x, y + footerTop, w, code, 10);
 };
 
 // GET /api/qr-stickers/batches/:id/pdf — laid out on the batch's paper size (A4 unless chosen otherwise).
