@@ -516,8 +516,9 @@ const getShareCard = async (req, res) => {
     if (!scan.qrCode || !STICKER_SHOWN_FOR.includes(scan.result)) {
       return res.status(404).json({ message: 'This scan has no sticker to share.' });
     }
-    const sticker = await stickerJson(scan, req.user);
-    const png = await buildShareCard(scan, { showPhoto: Boolean(sticker.imageUrl) });
+    // The photo goes into the shared image for anyone allowed to see it (admins and the batch's
+    // creator), on every kind of scan — including mismatches, where the page itself hides it.
+    const png = await buildShareCard(scan, { showPhoto: canSeeFullJourney(req.user, scan.qrCode) });
     res.set({ 'Content-Type': 'image/png', 'Cache-Control': 'private, max-age=300' });
     return res.send(png);
   } catch (err) {
