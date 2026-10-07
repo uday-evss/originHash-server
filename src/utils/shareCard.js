@@ -23,6 +23,37 @@ const STATUS = {
   AUTHENTIC: { label: 'Verified · Authentic', color: '#15803d', bg: '#dcfce7' },
   SCANNED: { label: 'Tracked · Product scanned', color: '#1d4ed8', bg: '#dbeafe' },
   UNMATCHED: { label: 'Product mismatched', color: '#dc2626', bg: '#fee2e2' },
+  ALREADY_VIEWED: { label: 'Already verified earlier', color: '#9a3412', bg: '#ffedd5' },
+  NOT_FOUND: { label: 'Not authentic', color: '#dc2626', bg: '#fee2e2' },
+  INVALID: { label: 'Not an OriginHash QR', color: '#dc2626', bg: '#fee2e2' },
+  ROLLED_BACK: { label: 'Not verified', color: '#374151', bg: '#e5e7eb' },
+  PENDING: { label: 'Not verified', color: '#374151', bg: '#e5e7eb' },
+};
+
+// A scan whose code isn't one of our stickers (NOT_FOUND / INVALID): the result, what was scanned,
+// and when / where — there is no sticker to draw.
+const buildNoStickerCard = (scan, status) => {
+  const H = 640;
+  const cardTop = M + 64 + 36;
+  const cardW = W - M * 2;
+  const statusW = Math.min(cardW, 60 + status.label.length * 19);
+  const lines = scan.code
+    ? ['This code is not in OriginHash records,', 'so the product may not be genuine.']
+    : ["This QR code doesn't belong to an", 'OriginHash product sticker.'];
+  const svg = `
+<svg width="${W}" height="${H}" xmlns="http://www.w3.org/2000/svg">
+  <rect width="${W}" height="${H}" fill="${CREAM}"/>
+  <rect x="${(W - statusW) / 2}" y="${M}" width="${statusW}" height="64" rx="32" fill="${status.bg}"/>
+  <text x="${W / 2}" y="${M + 43}" text-anchor="middle" font-family="${FONT}" font-size="32" font-weight="700" fill="${status.color}">${esc(status.label)}</text>
+  <rect x="${M}" y="${cardTop}" width="${cardW}" height="300" rx="26" fill="#ffffff" stroke="${BORDER}" stroke-width="3"/>
+  <text x="${W / 2}" y="${cardTop + 70}" text-anchor="middle" font-family="${FONT}" font-size="26" font-weight="700" fill="${MUTED}">${scan.code ? 'CODE SCANNED' : 'QR SCANNED'}</text>
+  <text x="${W / 2}" y="${cardTop + 130}" text-anchor="middle" font-family="${MONO}" font-size="40" font-weight="700" fill="${FOREST}">${esc(clip(scan.code || 'Unknown QR code', 30))}</text>
+  ${lines.map((l, i) => `<text x="${W / 2}" y="${cardTop + 200 + i * 40}" text-anchor="middle" font-family="${FONT}" font-size="28" fill="${MUTED}">${esc(l)}</text>`).join('')}
+  <text x="${M + 40}" y="${cardTop + 300 + 60}" font-family="${FONT}" font-size="26" font-weight="700" fill="${FOREST}">ORIGINHASH</text>
+  <text x="${W - M - 40}" y="${cardTop + 300 + 60}" text-anchor="end" font-family="${FONT}" font-size="26" fill="${MUTED}">${esc(`Checked on ${dateTime(scan.createdAt)}`)}</text>
+  ${scan.locationName ? `<text x="${W - M - 40}" y="${cardTop + 300 + 100}" text-anchor="end" font-family="${FONT}" font-size="26" fill="${MUTED}">${esc(clip(scan.locationName, 50))}</text>` : ''}
+</svg>`;
+  return sharp(Buffer.from(svg)).png().toBuffer();
 };
 
 const esc = (s) => String(s ?? '').replace(/[&<>"']/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' })[c]);
@@ -45,8 +76,9 @@ const fetchPhoto = async (url) => {
 // scan: the Scan with qrCode.batch loaded; showPhoto: whether this viewer may see the sticker image.
 const buildShareCard = async (scan, { showPhoto }) => {
   const { qrCode } = scan;
-  const { batch } = qrCode;
   const status = STATUS[scan.result] || { label: 'Verification', color: MUTED, bg: '#e5e7eb' };
+  if (!qrCode) return buildNoStickerCard(scan, status);
+  const { batch } = qrCode;
 
   const [qr, photo] = await Promise.all([
     QRCode.toBuffer(stickerQrPayload(qrCode.code), { margin: 1, width: TILE, color: { dark: '#000000', light: '#ffffff' } }),

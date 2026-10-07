@@ -503,8 +503,9 @@ const getSummary = async (req, res) => {
   }
 };
 
-// GET /api/scans/:id/share-card — a PNG of the scanned sticker (QR + code, and the sticker image where
-// this viewer may see it) for the Share button. Same access as GET /api/scans/:id.
+// GET /api/scans/:id/share-card — a PNG for the Share button, for every kind of scan: the sticker
+// (QR + code, and its image where this viewer may see it), or — when the scanned code isn't one of
+// ours — the result with the code that was scanned. Same access as GET /api/scans/:id.
 const getShareCard = async (req, res) => {
   try {
     if (!/^\d+$/.test(req.params.id)) return res.status(404).json({ message: 'Scan not found.' });
@@ -513,12 +514,9 @@ const getShareCard = async (req, res) => {
       include: [{ model: QrCode, as: 'qrCode', include: [{ model: QrBatch, as: 'batch' }] }],
     });
     if (!scan) return res.status(404).json({ message: 'Scan not found.' });
-    if (!scan.qrCode || !STICKER_SHOWN_FOR.includes(scan.result)) {
-      return res.status(404).json({ message: 'This scan has no sticker to share.' });
-    }
     // The photo goes into the shared image for anyone allowed to see it (admins and the batch's
     // creator), on every kind of scan — including mismatches, where the page itself hides it.
-    const png = await buildShareCard(scan, { showPhoto: canSeeFullJourney(req.user, scan.qrCode) });
+    const png = await buildShareCard(scan, { showPhoto: Boolean(scan.qrCode) && canSeeFullJourney(req.user, scan.qrCode) });
     res.set({ 'Content-Type': 'image/png', 'Cache-Control': 'private, max-age=300' });
     return res.send(png);
   } catch (err) {
