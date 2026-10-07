@@ -1,6 +1,6 @@
 const { Op } = require('sequelize');
 const { sequelize, QrBatch, QrCode, Scan, ScanReport, User } = require('../models');
-const { uploadFileToS3 } = require('../services/s3Service');
+const { uploadFileToS3, signedUrlFor } = require('../services/s3Service');
 const { nameScanLocation } = require('../utils/locationNames');
 const { isAdminUser, canSeeFullJourney } = require('../utils/roles');
 
@@ -59,9 +59,10 @@ const firstReveal = (qrCodeId, exceptId, transaction) =>
     transaction,
   });
 
+// Report photos live in a private S3 folder, so hand out a short-lived signed link to them.
 const reportJson = (report) => ({
   note: report.note,
-  photoUrl: report.photoUrl,
+  photoUrl: signedUrlFor(report.photoUrl),
   createdAt: report.createdAt,
 });
 

@@ -48,7 +48,8 @@ const s3 = () => {
     region: config.region,
   });
 
-  return new AWS.S3();
+  // v4 signing: required for presigned URLs in newer regions such as eu-north-1.
+  return new AWS.S3({ signatureVersion: 'v4' });
 };
 
 const uploadFileToS3 = async (file, customFolder = null) => {
@@ -93,4 +94,19 @@ const deleteFilesFromS3 = async (urls, prefix) => {
   return keys.length;
 };
 
-module.exports = { uploadFileToS3, deleteFilesFromS3 };
+// A time-limited link to a private file uploaded by uploadFileToS3. Use it for files that must not
+// be publicly readable (e.g. scan-report photos): the bucket only serves some folders publicly,
+// so the stored URL itself answers 403. Falls back to the stored URL if it can't be signed.
+const signedUrlFor = (url, expiresInSeconds = 60 * 60) => {
+  if (!url) return url;
+  try {
+    const { bucket } = getAwsConfig();
+    const key = keyFromUrl(url, bucket);
+    return key ? s3().getSignedUrl('getObject', { Bucket: bucket, Key: key, Expires: expiresInSeconds }) : url;
+  } catch (err) {
+    console.error('Could not sign S3 URL:', err.message);
+    return url;
+  }
+};
+
+module.exports = { uploadFileToS3, deleteFilesFromS3, signedUrlFor };
