@@ -277,38 +277,83 @@ const buildJourney = async (codeRow, viewer) => {
   };
 };
 
-// GET /api/scans?filter=all|verified|failed|scanned&before=<id> — scan history, newest first.
+const HISTORY_PAGE_SIZES = [10, 20, 50];
+const SEARCH_MAX = 100;
+
+// Text search across what the history table shows: code, product, producer, batch, place —
+// and, for admins (who see everyone's scans), the scanner's name.
+const historySearch = (q, viewer) => {
+  const like = { [Op.like]: `%${q.replace(/[\\%_]/g, '\\$&')}%` };
+  return [
+    { code: like },
+    { locationName: like },
+    { '$qrCode.batch.product_name$': like },
+    { '$qrCode.batch.producer$': like },
+    { '$qrCode.batch.batch_no$': like },
+    ...(isAdminUser(viewer) ? [{ '$user.name$': like }] : []),
+  ];
+};
+
+const historyRowJson = (scan, viewer) => ({
+  ...scanJson(scan),
+  location: locationJson(scan),
+  productName: scan.qrCode?.batch?.productName ?? null,
+  variantSize: scan.qrCode?.batch?.variantSize ?? null,
+  producer: scan.qrCode?.batch?.producer ?? null,
+  scannedBy: scannedByJson(scan, viewer),
+});
+
+// GET /api/scans?filter=all|verified|failed|scanned&q=<text>&page=<n>&pageSize=10|20|50 — scan
+// history, newest first, one numbered page at a time (with the total, for pagination).
+// The older ?before=<id> cursor ("Load more") still works for clients that send it without `page`.
 // Admins get every user's scans (with who scanned); everyone else gets their own.
 const listScans = async (req, res) => {
   try {
     const filter = Object.hasOwn(HISTORY_FILTERS, req.query.filter) ? req.query.filter : 'all';
+    const q = String(req.query.q ?? '').trim().slice(0, SEARCH_MAX);
     const before = Number(req.query.before);
+    const cursorMode = req.query.page === undefined && Number.isInteger(before) && before > 0;
+    const pageSize = HISTORY_PAGE_SIZES.includes(Number(req.query.pageSize)) ? Number(req.query.pageSize) : HISTORY_PAGE;
 
     const where = historyScope(req.user);
     if (HISTORY_FILTERS[filter]) where.result = HISTORY_FILTERS[filter];
-    if (Number.isInteger(before) && before > 0) where.id = { [Op.lt]: before };
+    if (q) where[Op.or] = historySearch(q, req.user);
+    if (cursorMode) where.id = { [Op.lt]: before };
 
-    const rows = await Scan.findAll({
+    const query = {
       where,
       include: [
         { model: QrCode, as: 'qrCode', include: [{ model: QrBatch, as: 'batch' }] },
         { model: User, as: 'user', attributes: SCANNER_ATTRIBUTES },
       ],
       order: [['id', 'DESC']],
-      limit: HISTORY_PAGE + 1,
-    });
+      subQuery: false,
+    };
+    const scope = isAdminUser(req.user) ? 'all' : 'own';
+
+    if (cursorMode) {
+      const rows = await Scan.findAll({ ...query, limit: pageSize + 1 });
+      return res.status(200).json({
+        scope,
+        scans: rows.slice(0, pageSize).map((scan) => historyRowJson(scan, req.user)),
+        hasMore: rows.length > pageSize,
+      });
+    }
+
+    const total = await Scan.count({ where, include: query.include, distinct: true, col: 'id' });
+    const totalPages = Math.max(1, Math.ceil(total / pageSize));
+    // A page past the end (rows were filtered away since the link was made) shows the last page.
+    const page = Math.min(Math.max(1, Math.trunc(Number(req.query.page)) || 1), totalPages);
+    const rows = total ? await Scan.findAll({ ...query, limit: pageSize, offset: (page - 1) * pageSize }) : [];
 
     return res.status(200).json({
-      scope: isAdminUser(req.user) ? 'all' : 'own',
-      scans: rows.slice(0, HISTORY_PAGE).map((scan) => ({
-        ...scanJson(scan),
-        location: locationJson(scan),
-        productName: scan.qrCode?.batch?.productName ?? null,
-        variantSize: scan.qrCode?.batch?.variantSize ?? null,
-        producer: scan.qrCode?.batch?.producer ?? null,
-        scannedBy: scannedByJson(scan, req.user),
-      })),
-      hasMore: rows.length > HISTORY_PAGE,
+      scope,
+      scans: rows.map((scan) => historyRowJson(scan, req.user)),
+      total,
+      page,
+      pageSize,
+      totalPages,
+      hasMore: page < totalPages,
     });
   } catch (err) {
     console.error(err);
