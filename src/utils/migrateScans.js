@@ -115,6 +115,11 @@ const migrateScans = async () => {
       console.log('scans.image_revealed_at added.');
     }
 
+    if (resultType && !(await columnType('scans', 'reveal_closed_at'))) {
+      await sequelize.query('ALTER TABLE scans ADD COLUMN reveal_closed_at DATETIME NULL');
+      console.log('scans.reveal_closed_at added.');
+    }
+
     if (resultType && !(await columnType('scans', 'location_name'))) {
       await sequelize.query('ALTER TABLE scans ADD COLUMN location_name VARCHAR(255) NULL AFTER longitude');
       console.log('scans.location_name added.');

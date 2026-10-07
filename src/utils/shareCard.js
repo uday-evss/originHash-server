@@ -19,6 +19,7 @@ const BORDER = '#e7ddcc';
 const MUTED = '#6b7280';
 
 const STATUS = {
+  VERIFIED: { label: 'Verified', color: '#15803d', bg: '#dcfce7' },
   MATCHED: { label: 'Verified · Authentic', color: '#15803d', bg: '#dcfce7' },
   AUTHENTIC: { label: 'Verified · Authentic', color: '#15803d', bg: '#dcfce7' },
   SCANNED: { label: 'Tracked · Product scanned', color: '#1d4ed8', bg: '#dbeafe' },

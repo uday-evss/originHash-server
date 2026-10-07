@@ -2,7 +2,11 @@ const { DataTypes } = require('sequelize');
 const sequelize = require('../config/db');
 
 // SCANNED        "Scan to record": the product reached this user (supply-chain movement).
-// PENDING        "Verify to authenticate" started; waiting for the user to reveal the image and answer.
+// VERIFIED       "Verify to authenticate" pressed by the FIRST user to verify this sticker. That press
+//                uses the sticker up: this user gets one chance to see its image ("Yes, show the image");
+//                everyone after them — this user included — gets ALREADY_VIEWED. Becomes MATCHED or
+//                UNMATCHED if the user answers after seeing the image.
+// PENDING        Legacy: a verification started under the old rule (before VERIFIED).
 // MATCHED        The user confirmed the revealed image matches the product in hand.
 // UNMATCHED      The user said the revealed image doesn't match.
 // ROLLED_BACK    The user backed out (or left the screen) before answering.
@@ -12,6 +16,7 @@ const sequelize = require('../config/db');
 // AUTHENTIC      Legacy: verifications from before the image-match step.
 const RESULTS = [
   'SCANNED',
+  'VERIFIED',
   'PENDING',
   'MATCHED',
   'UNMATCHED',
@@ -80,6 +85,13 @@ const Scan = sequelize.define(
       field: 'location_name',
     },
     // Set on the one scan that revealed this sticker's image; a sticker's image is shown only once, ever.
+    // When the one chance to see the image ended without seeing it ("Not now, go back", or leaving
+    // the screen). The scan stays VERIFIED; the image can no longer be revealed.
+    revealClosedAt: {
+      type: DataTypes.DATE,
+      allowNull: true,
+      field: 'reveal_closed_at',
+    },
     imageRevealedAt: {
       type: DataTypes.DATE,
       allowNull: true,

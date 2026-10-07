@@ -9,9 +9,20 @@ const { buildShareCard } = require('../utils/shareCard');
 const ACTIONS = ['record', 'verify'];
 const RECENT_LIMIT = 5;
 const REPORT_NOTE_MAX = 1000;
-const SUCCEEDED = ['MATCHED', 'AUTHENTIC'];
+const SUCCEEDED = ['VERIFIED', 'MATCHED', 'AUTHENTIC'];
+// Results that mean this verification used the sticker up (see firstClaim).
+const CLAIMED = ['VERIFIED', 'MATCHED', 'UNMATCHED', 'AUTHENTIC'];
 const FAILED = ['UNMATCHED', 'NOT_FOUND', 'INVALID', 'ALREADY_VIEWED'];
-const HISTORY_FILTERS = { all: null, verified: SUCCEEDED, failed: FAILED, scanned: ['SCANNED'] };
+// History filters. A mismatch (the buyer reported the image didn't match) has its own filter;
+// "failed" is everything else that didn't verify (unknown code, not ours, already revealed).
+const MISMATCHED = ['UNMATCHED'];
+const HISTORY_FILTERS = {
+  all: null,
+  verified: SUCCEEDED,
+  mismatched: MISMATCHED,
+  failed: FAILED.filter((result) => !MISMATCHED.includes(result)),
+  scanned: ['SCANNED'],
+};
 const HISTORY_PAGE = 20;
 const JOURNEY_LIMIT = 50;
 
@@ -49,6 +60,24 @@ const locationJson = (scan) =>
     ? { latitude: Number(scan.latitude), longitude: Number(scan.longitude), name: scan.locationName ?? null }
     : null;
 
+// The verification that used this sticker up: the first "Verify to authenticate" press (VERIFIED and
+// what it became), or — for verifications from before that rule — the first one that revealed the
+// image. Inside a transaction this is a locking read, so it sees claims committed a moment ago.
+const firstClaim = (qrCodeId, { exceptId, transaction } = {}) =>
+  Scan.findOne({
+    where: {
+      qrCodeId,
+      action: 'verify',
+      [Op.or]: [{ result: CLAIMED }, { imageRevealedAt: { [Op.ne]: null } }],
+      ...(exceptId && { id: { [Op.ne]: exceptId } }),
+    },
+    order: [['id', 'ASC']],
+    transaction,
+    ...(transaction && { lock: transaction.LOCK.UPDATE }),
+  });
+
+const claimedAt = (claim) => claim?.imageRevealedAt || claim?.createdAt || null;
+
 // The earliest scan that revealed this sticker's image, if any (other than `exceptId`).
 const firstReveal = (qrCodeId, exceptId, transaction) =>
   Scan.findOne({
@@ -76,7 +105,8 @@ const findOwnScan = (req, include = []) =>
 
 // POST /api/scans  { code, action: 'record' | 'verify', latitude?, longitude? }
 // `code` is null when the scanned QR wasn't an OriginHash sticker at all.
-// record → SCANNED. verify → PENDING (reveal + answer next), or a final NOT_FOUND / INVALID / ALREADY_VIEWED.
+// record → SCANNED. verify → VERIFIED for the first user ever to verify this sticker (they may then see
+// its image once), ALREADY_VIEWED for everyone after, or NOT_FOUND / INVALID for codes that aren't ours.
 const createScan = async (req, res) => {
   try {
     const { action } = req.body;
@@ -99,31 +129,39 @@ const createScan = async (req, res) => {
       });
     }
 
-    let result = 'SCANNED';
-    let earlierReveal = null;
-    if (action === 'verify') {
-      if (!codeRow) result = code ? 'NOT_FOUND' : 'INVALID';
-      else {
-        earlierReveal = await firstReveal(codeRow.id);
-        result = earlierReveal ? 'ALREADY_VIEWED' : 'PENDING';
+    // The sticker row is locked while deciding, so two people pressing Verify at the same moment
+    // can't both be "first": the second waits, then sees the first one's claim.
+    const { scan, claim } = await sequelize.transaction(async (transaction) => {
+      let result = 'SCANNED';
+      let earlierClaim = null;
+      if (action === 'verify') {
+        if (!codeRow) result = code ? 'NOT_FOUND' : 'INVALID';
+        else {
+          await QrCode.findByPk(codeRow.id, { transaction, lock: transaction.LOCK.UPDATE });
+          earlierClaim = await firstClaim(codeRow.id, { transaction });
+          result = earlierClaim ? 'ALREADY_VIEWED' : 'VERIFIED';
+        }
       }
-    }
-
-    const scan = await Scan.create({
-      userId: req.user.id,
-      qrCodeId: codeRow?.id ?? null,
-      code,
-      action,
-      result,
-      latitude: toCoordinate(req.body.latitude, 90),
-      longitude: toCoordinate(req.body.longitude, 180),
+      const created = await Scan.create(
+        {
+          userId: req.user.id,
+          qrCodeId: codeRow?.id ?? null,
+          code,
+          action,
+          result,
+          latitude: toCoordinate(req.body.latitude, 90),
+          longitude: toCoordinate(req.body.longitude, 180),
+        },
+        { transaction }
+      );
+      return { scan: created, claim: earlierClaim };
     });
     await req.user.increment('scansCount');
 
     res.status(201).json({
       scan: scanJson(scan),
       product: codeRow ? productJson(codeRow) : null,
-      ...(earlierReveal && { firstViewedAt: earlierReveal.imageRevealedAt }),
+      ...(claim && { firstViewedAt: claimedAt(claim) }),
     });
     nameScanLocation(scan);
     return undefined;
@@ -141,14 +179,20 @@ const revealImage = async (req, res) => {
     if (!scan) {
       return res.status(404).json({ message: 'Scan not found.' });
     }
-    if (scan.action !== 'verify' || scan.result !== 'PENDING' || !scan.qrCode) {
+    if (scan.action !== 'verify' || !['VERIFIED', 'PENDING'].includes(scan.result) || !scan.qrCode) {
       return res.status(409).json({ message: 'This verification is no longer open.', scan: scanJson(scan) });
+    }
+    // One chance only: once the user chose "Not now" (or left), the image stays hidden for good.
+    if (scan.revealClosedAt && !scan.imageRevealedAt) {
+      return res.status(409).json({ message: 'This verification is closed, so the image can no longer be shown.', scan: scanJson(scan) });
     }
 
     // Lock the sticker row so two people revealing the same code at once can't both see it.
     const earlier = await sequelize.transaction(async (transaction) => {
       await QrCode.findByPk(scan.qrCodeId, { transaction, lock: transaction.LOCK.UPDATE });
-      const found = await firstReveal(scan.qrCodeId, scan.id, transaction);
+      const revealed = await firstReveal(scan.qrCodeId, scan.id, transaction);
+      const claim = await firstClaim(scan.qrCodeId, { transaction });
+      const found = revealed || (claim && claim.id !== scan.id ? claim : null);
       if (found) await scan.update({ result: 'ALREADY_VIEWED' }, { transaction });
       else if (!scan.imageRevealedAt) await scan.update({ imageRevealedAt: new Date() }, { transaction });
       return found;
@@ -159,7 +203,7 @@ const revealImage = async (req, res) => {
         message: "This sticker's image has already been viewed.",
         scan: scanJson(scan),
         product: productJson(scan.qrCode),
-        firstViewedAt: earlier.imageRevealedAt,
+        firstViewedAt: claimedAt(earlier),
       });
     }
 
@@ -182,14 +226,27 @@ const settleScan = async (req, res) => {
     if (!scan) {
       return res.status(404).json({ message: 'Scan not found.' });
     }
-    if (scan.action !== 'verify' || scan.result !== 'PENDING') {
+    if (scan.action !== 'verify' || !['VERIFIED', 'PENDING'].includes(scan.result)) {
       return res.status(409).json({ message: 'This verification is already closed.', scan: scanJson(scan) });
     }
-    if (result !== 'ROLLED_BACK' && !scan.imageRevealedAt) {
+    // "Not now, go back" / leaving the screen. Under the one-press rule the sticker is used up anyway:
+    // the scan stays VERIFIED and its one chance to see the image ends. (Legacy PENDING rolls back.)
+    if (result === 'ROLLED_BACK') {
+      if (scan.result === 'VERIFIED') {
+        if (!scan.revealClosedAt) await scan.update({ revealClosedAt: new Date() });
+      } else {
+        await scan.update({ result });
+      }
+      return res.status(200).json({ scan: scanJson(scan), product: scan.qrCode ? productJson(scan.qrCode) : null });
+    }
+    if (!scan.imageRevealedAt) {
       return res.status(409).json({ message: 'Reveal the image before confirming a match.', scan: scanJson(scan) });
     }
+    if (scan.revealClosedAt) {
+      return res.status(409).json({ message: 'This verification is already closed.', scan: scanJson(scan) });
+    }
 
-    await scan.update({ result });
+    await scan.update({ result, revealClosedAt: new Date() });
     return res.status(200).json({ scan: scanJson(scan), product: scan.qrCode ? productJson(scan.qrCode) : null });
   } catch (err) {
     console.error(err);
@@ -207,7 +264,7 @@ const reportScan = async (req, res) => {
       return res.status(404).json({ message: 'Scan not found.' });
     }
 
-    const openAndRevealed = scan.result === 'PENDING' && scan.imageRevealedAt;
+    const openAndRevealed = ['VERIFIED', 'PENDING'].includes(scan.result) && scan.imageRevealedAt && !scan.revealClosedAt;
     if (!openAndRevealed && !['ALREADY_VIEWED', 'UNMATCHED'].includes(scan.result)) {
       return res.status(409).json({ message: 'This scan can no longer be reported.', scan: scanJson(scan) });
     }
@@ -401,10 +458,10 @@ const getScan = async (req, res) => {
     let journeyInfo = { journeyScope: 'own', buyerVerifiedAt: null, journey: [] };
     if (scan.qrCode) {
       const [earlier, info] = await Promise.all([
-        scan.result === 'ALREADY_VIEWED' ? firstReveal(scan.qrCodeId, scan.id) : null,
+        scan.result === 'ALREADY_VIEWED' ? firstClaim(scan.qrCodeId, { exceptId: scan.id }) : null,
         buildJourney(scan.qrCode, req.user),
       ]);
-      firstViewedAt = earlier?.imageRevealedAt ?? null;
+      firstViewedAt = claimedAt(earlier);
       journeyInfo = info;
     }
 

@@ -70,6 +70,7 @@ const getStats = async (req, res) => {
 
     // Verification outcomes: matched / mismatch / flagged (unknown or already-revealed sticker) / abandoned.
     const OUTCOME_OF = {
+      VERIFIED: 'matched',
       MATCHED: 'matched',
       AUTHENTIC: 'matched',
       UNMATCHED: 'unmatched',
