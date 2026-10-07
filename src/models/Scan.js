@@ -2,17 +2,16 @@ const { DataTypes } = require('sequelize');
 const sequelize = require('../config/db');
 
 // SCANNED        "Scan to record": the product reached this user (supply-chain movement).
-// VERIFIED       "Verify to authenticate" pressed by the FIRST user to verify this sticker. That press
-//                uses the sticker up: this user gets one chance to see its image ("Yes, show the image");
-//                everyone after them — this user included — gets ALREADY_VIEWED. Becomes MATCHED or
-//                UNMATCHED if the user answers after seeing the image.
+// VERIFIED       "Verify to authenticate" pressed. Everyone then sees the image and compares; only the
+//                very first verifier of a sticker is asked first ("Yes, show the image / Not now").
+//                Becomes MATCHED or UNMATCHED when the user answers after seeing the image.
 // PENDING        Legacy: a verification started under the old rule (before VERIFIED).
 // MATCHED        The user confirmed the revealed image matches the product in hand.
 // UNMATCHED      The user said the revealed image doesn't match.
 // ROLLED_BACK    The user backed out (or left the screen) before answering.
 // NOT_FOUND      The scanned code isn't an OriginHash sticker code.
 // INVALID        The QR wasn't an OriginHash sticker at all.
-// ALREADY_VIEWED The sticker's image had already been revealed once, so it wasn't shown again.
+// ALREADY_VIEWED Legacy: under the earlier once-only rule, the image had already been revealed.
 // AUTHENTIC      Legacy: verifications from before the image-match step.
 const RESULTS = [
   'SCANNED',

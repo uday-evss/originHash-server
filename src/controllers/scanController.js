@@ -78,18 +78,6 @@ const firstClaim = (qrCodeId, { exceptId, transaction } = {}) =>
 
 const claimedAt = (claim) => claim?.imageRevealedAt || claim?.createdAt || null;
 
-// The earliest scan that revealed this sticker's image, if any (other than `exceptId`).
-const firstReveal = (qrCodeId, exceptId, transaction) =>
-  Scan.findOne({
-    where: {
-      qrCodeId,
-      imageRevealedAt: { [Op.ne]: null },
-      ...(exceptId && { id: { [Op.ne]: exceptId } }),
-    },
-    order: [['imageRevealedAt', 'ASC']],
-    transaction,
-  });
-
 // Report photos live in a private S3 folder, so hand out a short-lived signed link to them.
 const reportJson = (report) => ({
   note: report.note,
@@ -105,8 +93,10 @@ const findOwnScan = (req, include = []) =>
 
 // POST /api/scans  { code, action: 'record' | 'verify', latitude?, longitude? }
 // `code` is null when the scanned QR wasn't an OriginHash sticker at all.
-// record → SCANNED. verify → VERIFIED for the first user ever to verify this sticker (they may then see
-// its image once), ALREADY_VIEWED for everyone after, or NOT_FOUND / INVALID for codes that aren't ours.
+// record → SCANNED. verify → VERIFIED (then the image is shown and compared), or NOT_FOUND / INVALID for
+// codes that aren't ours. `askFirst` is true only for the very first verification of a sticker: that
+// user alone gets the "Yes, show the image / Not now" question; everyone after goes straight to the
+// image, with `firstVerifiedAt` saying when it was first verified.
 const createScan = async (req, res) => {
   try {
     const { action } = req.body;
@@ -130,7 +120,7 @@ const createScan = async (req, res) => {
     }
 
     // The sticker row is locked while deciding, so two people pressing Verify at the same moment
-    // can't both be "first": the second waits, then sees the first one's claim.
+    // can't both be "first" (and both be asked): the second waits, then sees the first one.
     const { scan, claim } = await sequelize.transaction(async (transaction) => {
       let result = 'SCANNED';
       let earlierClaim = null;
@@ -139,7 +129,7 @@ const createScan = async (req, res) => {
         else {
           await QrCode.findByPk(codeRow.id, { transaction, lock: transaction.LOCK.UPDATE });
           earlierClaim = await firstClaim(codeRow.id, { transaction });
-          result = earlierClaim ? 'ALREADY_VIEWED' : 'VERIFIED';
+          result = 'VERIFIED';
         }
       }
       const created = await Scan.create(
@@ -161,7 +151,7 @@ const createScan = async (req, res) => {
     res.status(201).json({
       scan: scanJson(scan),
       product: codeRow ? productJson(codeRow) : null,
-      ...(claim && { firstViewedAt: claimedAt(claim) }),
+      ...(scan.result === 'VERIFIED' && { askFirst: !claim, firstVerifiedAt: claimedAt(claim) }),
     });
     nameScanLocation(scan);
     return undefined;
@@ -187,27 +177,16 @@ const revealImage = async (req, res) => {
       return res.status(409).json({ message: 'This verification is closed, so the image can no longer be shown.', scan: scanJson(scan) });
     }
 
-    // Lock the sticker row so two people revealing the same code at once can't both see it.
-    const earlier = await sequelize.transaction(async (transaction) => {
-      await QrCode.findByPk(scan.qrCodeId, { transaction, lock: transaction.LOCK.UPDATE });
-      const revealed = await firstReveal(scan.qrCodeId, scan.id, transaction);
-      const claim = await firstClaim(scan.qrCodeId, { transaction });
-      const found = revealed || (claim && claim.id !== scan.id ? claim : null);
-      if (found) await scan.update({ result: 'ALREADY_VIEWED' }, { transaction });
-      else if (!scan.imageRevealedAt) await scan.update({ imageRevealedAt: new Date() }, { transaction });
-      return found;
+    // Every verifier compares against the image; it's shown again on a reload of the same scan.
+    if (!scan.imageRevealedAt) await scan.update({ imageRevealedAt: new Date() });
+    const claim = await firstClaim(scan.qrCodeId, { exceptId: scan.id });
+    const earlier = claim && claim.id < scan.id ? claim : null;
+
+    return res.status(200).json({
+      scan: scanJson(scan),
+      product: productJson(scan.qrCode, { withImage: true }),
+      firstVerifiedAt: claimedAt(earlier),
     });
-
-    if (earlier) {
-      return res.status(409).json({
-        message: "This sticker's image has already been viewed.",
-        scan: scanJson(scan),
-        product: productJson(scan.qrCode),
-        firstViewedAt: claimedAt(earlier),
-      });
-    }
-
-    return res.status(200).json({ scan: scanJson(scan), product: productJson(scan.qrCode, { withImage: true }) });
   } catch (err) {
     console.error(err);
     return res.status(500).json({ message: 'Could not show the image.' });
