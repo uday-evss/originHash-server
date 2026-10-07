@@ -4,6 +4,8 @@ const { sequelize } = require('./models');
 const seedAdmin = require('./utils/seedAdmin');
 const migrateScans = require('./utils/migrateScans');
 const { backfillLocationNames } = require('./utils/locationNames');
+const { billingStatus } = require('./services/walletService');
+const { startPlanSweeps } = require('./services/planService');
 
 const PORT = process.env.PORT || 5000;
 
@@ -21,6 +23,8 @@ const start = async () => {
 
     app.listen(PORT, () => {
       console.log(`OriginHash backend running on http://localhost:${PORT}`);
+      console.log(billingStatus());
+      startPlanSweeps(); // background: renew plans and reset monthly allowances on time
       backfillLocationNames(); // background; rate-limited lookups
     });
   } catch (err) {

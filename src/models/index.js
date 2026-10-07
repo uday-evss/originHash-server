@@ -8,6 +8,10 @@ const QrCode = require('./QrCode');
 const Scan = require('./Scan');
 const ScanReport = require('./ScanReport');
 const UserProfileVersion = require('./UserProfileVersion');
+const Wallet = require('./Wallet');
+const WalletTopup = require('./WalletTopup');
+const WalletTransaction = require('./WalletTransaction');
+const PlanSubscription = require('./PlanSubscription');
 
 ImageFolder.hasMany(ImageAsset, { foreignKey: 'folderId', as: 'images', onDelete: 'CASCADE' });
 ImageAsset.belongsTo(ImageFolder, { foreignKey: 'folderId', as: 'folder' });
@@ -39,6 +43,21 @@ Scan.belongsTo(QrCode, { foreignKey: 'qrCodeId', as: 'qrCode' });
 Scan.hasOne(ScanReport, { foreignKey: 'scanId', as: 'report', onDelete: 'CASCADE' });
 ScanReport.belongsTo(Scan, { foreignKey: 'scanId', as: 'scan' });
 
+User.hasOne(Wallet, { foreignKey: 'userId', as: 'wallet', onDelete: 'CASCADE' });
+Wallet.belongsTo(User, { foreignKey: 'userId', as: 'user' });
+
+User.hasMany(WalletTopup, { foreignKey: 'userId', as: 'walletTopups', onDelete: 'CASCADE' });
+WalletTopup.belongsTo(User, { foreignKey: 'userId', as: 'user' });
+
+User.hasMany(WalletTransaction, { foreignKey: 'userId', as: 'walletTransactions', onDelete: 'CASCADE' });
+WalletTransaction.belongsTo(User, { foreignKey: 'userId', as: 'user' });
+// The ledger keeps its row (and amount) if the top-up or batch behind it is ever removed.
+WalletTransaction.belongsTo(WalletTopup, { foreignKey: 'topupId', as: 'topup', onDelete: 'SET NULL' });
+WalletTransaction.belongsTo(QrBatch, { foreignKey: 'batchId', as: 'batch', onDelete: 'SET NULL' });
+
+User.hasMany(PlanSubscription, { foreignKey: 'userId', as: 'planSubscriptions', onDelete: 'CASCADE' });
+PlanSubscription.belongsTo(User, { foreignKey: 'userId', as: 'user' });
+
 module.exports = {
   sequelize,
   User,
@@ -50,4 +69,8 @@ module.exports = {
   Scan,
   ScanReport,
   UserProfileVersion,
+  Wallet,
+  WalletTopup,
+  WalletTransaction,
+  PlanSubscription,
 };

@@ -10,6 +10,9 @@ const imageStockRoutes = require('./routes/imageStockRoutes');
 const qrStickerRoutes = require('./routes/qrStickerRoutes');
 const dashboardRoutes = require('./routes/dashboardRoutes');
 const scanRoutes = require('./routes/scanRoutes');
+const walletRoutes = require('./routes/walletRoutes');
+const paymentRoutes = require('./routes/paymentRoutes');
+const planRoutes = require('./routes/planRoutes');
 
 const app = express();
 
@@ -38,7 +41,14 @@ app.use(
       : undefined
   )
 );
-app.use(express.json());
+// Keep the exact request bytes too: Razorpay webhook signatures are computed over the raw body.
+app.use(
+  express.json({
+    verify: (req, res, buf) => {
+      req.rawBody = buf;
+    },
+  })
+);
 app.use(express.urlencoded({ extended: true }));
 app.use('/uploads', express.static(path.join(__dirname, '..', 'uploads')));
 
@@ -51,6 +61,9 @@ app.use('/api/image-stock', imageStockRoutes);
 app.use('/api/qr-stickers', qrStickerRoutes);
 app.use('/api/dashboard', dashboardRoutes);
 app.use('/api/scans', scanRoutes);
+app.use('/api/wallet', walletRoutes);
+app.use('/api/payments', paymentRoutes);
+app.use('/api/plans', planRoutes);
 
 // 404
 app.use((req, res) => res.status(404).json({ message: 'Route not found.' }));

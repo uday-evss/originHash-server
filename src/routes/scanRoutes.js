@@ -9,6 +9,7 @@ const {
   getSummary,
   listScans,
   getScan,
+  getShareCard,
   getJourney,
 } = require('../controllers/scanController');
 
@@ -29,6 +30,7 @@ router.get('/', listScans);
 router.post('/', createScan);
 router.get('/summary', getSummary);
 router.get('/journey/:uuid', getJourney);
+router.get('/:id/share-card', getShareCard);
 router.get('/:id', getScan);
 router.post('/:id/reveal', revealImage);
 router.post('/:id/report', reportPhoto, reportScan);

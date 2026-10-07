@@ -155,6 +155,18 @@ const migrateScans = async () => {
     }
 
     await ensureProfileHistory();
+
+    // What each batch cost (sticker billing). Older batches stay NULL — they were free.
+    if (!(await columnType('qr_batches', 'price_per_qr_paise'))) {
+      await sequelize.query(
+        'ALTER TABLE qr_batches ADD COLUMN price_per_qr_paise INT UNSIGNED NULL, ADD COLUMN amount_charged_paise INT UNSIGNED NULL'
+      );
+      console.log('qr_batches.price_per_qr_paise / amount_charged_paise added.');
+    }
+    if (!(await columnType('qr_batches', 'plan_covered_count'))) {
+      await sequelize.query('ALTER TABLE qr_batches ADD COLUMN plan_covered_count INT UNSIGNED NULL');
+      console.log('qr_batches.plan_covered_count added.');
+    }
   } catch (err) {
     // Keep the API up; the new columns only add detail to scans and stickers.
     console.error('Could not migrate the database:', err.message);

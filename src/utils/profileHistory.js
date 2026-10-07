@@ -1,4 +1,4 @@
-const { UserProfileVersion } = require('../models');
+const { User, UserProfileVersion } = require('../models');
 
 // The details that identify a user to admins. Whenever any of them changes a new version is
 // saved, so a rename (Harish → Kumar) never hides who generated earlier QR batches.
@@ -27,10 +27,15 @@ const profileChanges = (before, after) =>
 // returns the version that now describes the user. `source` is 'self', 'admin' (pass
 // changedBy) or 'system'.
 const recordProfileVersion = async (user, { source, changedBy = null, transaction } = {}) => {
+  // Inside a transaction, queue behind any other request recording a version for this user, and
+  // read the newest version with a locking read: a plain read would see the transaction's older
+  // snapshot, so two concurrent requests could both write the same version number.
+  if (transaction) await User.findByPk(user.id, { attributes: ['id'], transaction, lock: transaction.LOCK.UPDATE });
   const latest = await UserProfileVersion.findOne({
     where: { userId: user.id },
     order: [['versionNo', 'DESC']],
     transaction,
+    ...(transaction && { lock: transaction.LOCK.UPDATE }),
   });
   if (latest && profileChanges(latest, user).length === 0) return latest;
 

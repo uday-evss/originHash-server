@@ -3,6 +3,8 @@ const { sequelize, QrBatch, QrCode, Scan, ScanReport, User } = require('../model
 const { uploadFileToS3, signedUrlFor } = require('../services/s3Service');
 const { nameScanLocation } = require('../utils/locationNames');
 const { isAdminUser, canSeeFullJourney } = require('../utils/roles');
+const { stickerQrDataUrl } = require('../utils/stickerQr');
+const { buildShareCard } = require('../utils/shareCard');
 
 const ACTIONS = ['record', 'verify'];
 const RECENT_LIMIT = 5;
@@ -362,6 +364,20 @@ const listScans = async (req, res) => {
   }
 };
 
+// The sticker behind a recorded, verified or mismatched scan: its QR for everyone who can open the scan, and
+// its image only for admins and the user who generated the batch. The image is the secret a
+// buyer compares against, so for anyone else it never leaves the server.
+const STICKER_SHOWN_FOR = ['SCANNED', ...SUCCEEDED, 'UNMATCHED'];
+const stickerJson = async (scan, viewer) => {
+  if (!scan.qrCode || !STICKER_SHOWN_FOR.includes(scan.result)) return null;
+  return {
+    code: scan.qrCode.code,
+    qrDataUrl: await stickerQrDataUrl(scan.qrCode.code),
+    // Mismatched scans show only the QR and its code, for everyone.
+    imageUrl: scan.result !== 'UNMATCHED' && canSeeFullJourney(viewer, scan.qrCode) ? scan.qrCode.imageUrl : null,
+  };
+};
+
 // GET /api/scans/:id — one scan (the user's own; any scan for admins) with the product, any
 // report, and the sticker's journey as this viewer is allowed to see it.
 const getScan = async (req, res) => {
@@ -394,6 +410,7 @@ const getScan = async (req, res) => {
 
     nameScanLocation(scan);
     return res.status(200).json({
+      sticker: await stickerJson(scan, req.user),
       scan: { ...scanJson(scan), location: locationJson(scan), qrCodeId: scan.qrCodeId, qrCodeUuid: scan.qrCode?.uuid ?? null },
       scannedBy: scannedByJson(scan, req.user),
       product: scan.qrCode ? productJson(scan.qrCode) : null,
@@ -486,4 +503,27 @@ const getSummary = async (req, res) => {
   }
 };
 
-module.exports = { createScan, revealImage, settleScan, reportScan, getSummary, listScans, getScan, getJourney };
+// GET /api/scans/:id/share-card — a PNG of the scanned sticker (QR + code, and the sticker image where
+// this viewer may see it) for the Share button. Same access as GET /api/scans/:id.
+const getShareCard = async (req, res) => {
+  try {
+    if (!/^\d+$/.test(req.params.id)) return res.status(404).json({ message: 'Scan not found.' });
+    const scan = await Scan.findOne({
+      where: { id: req.params.id, ...historyScope(req.user) },
+      include: [{ model: QrCode, as: 'qrCode', include: [{ model: QrBatch, as: 'batch' }] }],
+    });
+    if (!scan) return res.status(404).json({ message: 'Scan not found.' });
+    if (!scan.qrCode || !STICKER_SHOWN_FOR.includes(scan.result)) {
+      return res.status(404).json({ message: 'This scan has no sticker to share.' });
+    }
+    const sticker = await stickerJson(scan, req.user);
+    const png = await buildShareCard(scan, { showPhoto: Boolean(sticker.imageUrl) });
+    res.set({ 'Content-Type': 'image/png', 'Cache-Control': 'private, max-age=300' });
+    return res.send(png);
+  } catch (err) {
+    console.error(err);
+    return res.status(500).json({ message: 'Could not create the share image.' });
+  }
+};
+
+module.exports = { createScan, revealImage, settleScan, reportScan, getSummary, listScans, getScan, getShareCard, getJourney };

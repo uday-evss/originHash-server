@@ -66,6 +66,24 @@ const QrBatch = sequelize.define(
       allowNull: true,
       field: 'creator_profile_version_id',
     },
+    // What generating this batch cost, in paise. NULL on batches made before stickers were
+    // charged (or while billing is off).
+    pricePerQrPaise: {
+      type: DataTypes.INTEGER.UNSIGNED,
+      allowNull: true,
+      field: 'price_per_qr_paise',
+    },
+    amountChargedPaise: {
+      type: DataTypes.INTEGER.UNSIGNED,
+      allowNull: true,
+      field: 'amount_charged_paise',
+    },
+    // How many of the batch's stickers a plan's monthly allowance covered (the rest were charged).
+    planCoveredCount: {
+      type: DataTypes.INTEGER.UNSIGNED,
+      allowNull: true,
+      field: 'plan_covered_count',
+    },
   },
   {
     tableName: 'qr_batches',

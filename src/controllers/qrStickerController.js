@@ -6,6 +6,9 @@ const { Op } = require('sequelize');
 const { sequelize, QrBatch, QrCode, ImageFolder, ImageAsset, User, UserProfileVersion } = require('../models');
 const { canSeeFullJourney, isAdminUser } = require('../utils/roles');
 const { TRACKED_FIELDS, profileChanges, recordProfileVersion } = require('../utils/profileHistory');
+const { stickerQrPayload } = require('../utils/stickerQr');
+const { billingConfig, ensureWallet, lockWallet, formatRupees } = require('../services/walletService');
+const { refreshPlan, quoteBatch, chargeForBatch, planJson } = require('../services/planService');
 
 // Stickers only ever show this photo at business-card size, so re-encode it small
 // before embedding — otherwise a batch's PDF balloons to tens of MB per full-res photo.
@@ -14,14 +17,6 @@ const STICKER_IMAGE_PX = 500;
 const MIN_QRS = 1;
 const MAX_QRS = 500;
 const SPLIT_TYPES = ['vertical-50-50', 'horizontal-50-50'];
-
-// A sticker's QR opens the public verify page for its code, so a phone's own camera app
-// lands somewhere useful and the in-app scanner can tell exactly which unit it is.
-// Falls back to the bare code (which the in-app scanner also accepts) if PUBLIC_APP_URL is unset.
-const stickerQrPayload = (code) => {
-  const appUrl = (process.env.PUBLIC_APP_URL || '').replace(/\/+$/, '');
-  return appUrl ? `${appUrl}/verify/${encodeURIComponent(code)}` : code;
-};
 
 const slugifyForCode = (name) =>
   (name || 'PRODUCT')
@@ -127,8 +122,14 @@ const createBatch = async (req, res) => {
       return res.status(400).json({ message: `Number of QRs must be between ${MIN_QRS} and ${MAX_QRS}.` });
     }
 
+    // Stickers are paid for from the creator's wallet (once billing is switched on).
+    const billing = billingConfig();
+    if (billing.enabled) await ensureWallet(req.user.id);
+
     // All or nothing, holding a shared lock on the folder: a sample folder can't be deleted while
     // stickers are being made from it, and one deleted a moment ago is simply not found.
+    // With billing on, the wallet row is locked too: the balance check, the stickers and the
+    // charge commit together, so concurrent requests can't spend the same balance twice.
     const result = await sequelize.transaction(async (transaction) => {
       const folder = await ImageFolder.findByPk(folderId, { transaction, lock: transaction.LOCK.SHARE });
       if (!folder) return { status: 404, message: 'Selected folder was not found.' };
@@ -136,6 +137,32 @@ const createBatch = async (req, res) => {
       const availableImages = await ImageAsset.findAll({ where: { folderId, isBlocked: false }, transaction });
       if (!availableImages.length) {
         return { status: 400, message: 'Selected folder has no available (unblocked) images.' };
+      }
+
+      // The plan's monthly allowance is used first; anything beyond it is charged from the wallet.
+      const wallet = billing.enabled ? await lockWallet(req.user.id, transaction) : null;
+      const plan = wallet ? await refreshPlan(wallet, transaction) : null;
+      if (wallet) {
+        const quote = quoteBatch(count, plan);
+        if (quote.totalPaise > wallet.balancePaise) {
+          const shortfallPaise = quote.totalPaise - wallet.balancePaise;
+          const what = quote.coveredCount
+            ? `${quote.extraCount} stickers beyond your plan's allowance cost ${formatRupees(quote.totalPaise)}`
+            : `${count} stickers cost ${formatRupees(quote.totalPaise)}`;
+          return {
+            status: 402,
+            message: `Not enough balance: ${what} and your wallet has ${formatRupees(wallet.balancePaise)}. Add ${formatRupees(
+              shortfallPaise
+            )} or more to continue.`,
+            extra: {
+              code: 'INSUFFICIENT_BALANCE',
+              balancePaise: wallet.balancePaise,
+              requiredPaise: quote.totalPaise,
+              shortfallPaise,
+              plan: planJson(plan),
+            },
+          };
+        }
       }
 
       // Pin the creator's details as they are right now, so a later rename can't blur who made this.
@@ -165,18 +192,30 @@ const createBatch = async (req, res) => {
         await code.save({ transaction });
         codes.push(code);
       }
-      return { folder, batch, codes };
+
+      const charge = wallet ? await chargeForBatch(wallet, plan, { batch, count }, transaction) : null;
+      return { folder, batch, codes, charge, plan, balancePaise: wallet?.balancePaise ?? null };
     });
 
     if (result.status) {
-      return res.status(result.status).json({ message: result.message });
+      return res.status(result.status).json({ message: result.message, ...result.extra });
     }
-    const { folder, batch, codes } = result;
+    const { folder, batch, codes, charge, plan, balancePaise } = result;
 
     return res.status(201).json({
       message: `${count} QR sticker(s) generated.`,
       batch: batchJson({ ...batch.toJSON(), folder }),
       codes: codes.map((c) => codeJson(c)),
+      ...(charge && {
+        wallet: {
+          chargedPaise: charge.totalPaise,
+          coveredCount: charge.coveredCount,
+          extraCount: charge.extraCount,
+          extraPricePaise: charge.extraPricePaise,
+          balancePaise,
+          plan: planJson(plan),
+        },
+      }),
     });
   } catch (err) {
     console.error(err);
